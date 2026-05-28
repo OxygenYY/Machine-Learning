@@ -66,10 +66,10 @@ const rehypePlugins = [
   [rehypePrettyCode, { theme: "github-dark", keepBackground: false }],
 ] as any;
 
-export async function compileMdxToJsx(
+export async function compileMdxToHtml(
   rawContent: string,
   components?: MDXComponents
-): Promise<React.ReactElement> {
+): Promise<string> {
   const escaped = escapeJsxLiteral(rawContent);
 
   const compiled = await compile(escaped, {
@@ -82,5 +82,8 @@ export async function compileMdxToJsx(
     ...jsxRuntime,
   });
 
-  return React.createElement(MDXContent, { components });
+  const element = React.createElement(MDXContent, { components });
+
+  const { renderToString } = await import("react-dom/server");
+  return renderToString(element);
 }

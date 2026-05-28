@@ -8,7 +8,7 @@ import { Separator } from "@/components/ui/separator";
 import { DIFFICULTY_CONFIG } from "@/lib/constants";
 import { Clock, ListChecks } from "lucide-react";
 import type { Metadata } from "next";
-import { compileMdxToJsx } from "@/lib/mdx-compiler";
+import { compileMdxToHtml } from "@/lib/mdx-compiler";
 import { useMDXComponents } from "@/mdx-components";
 
 interface Props {
@@ -45,7 +45,7 @@ export default async function LessonPage({ params }: Props) {
   const { prev, next } = getAdjacentLessons(slug);
   const diffConfig = DIFFICULTY_CONFIG[lesson.meta.difficulty];
   const components = useMDXComponents({});
-  const mdxElement = await compileMdxToJsx(lesson.rawContent, components);
+  const mdxHtml = await compileMdxToHtml(lesson.rawContent, components);
 
   return (
     <div className="animate-fade-in">
@@ -108,9 +108,10 @@ export default async function LessonPage({ params }: Props) {
       {/* Lesson content */}
       <div className="flex gap-8">
         <div className="flex-1 min-w-0 max-w-3xl">
-          <article className="prose dark:prose-invert max-w-none">
-            {mdxElement}
-          </article>
+          <article
+            className="prose dark:prose-invert max-w-none"
+            dangerouslySetInnerHTML={{ __html: mdxHtml }}
+          />
 
           <Separator className="my-8" />
 
