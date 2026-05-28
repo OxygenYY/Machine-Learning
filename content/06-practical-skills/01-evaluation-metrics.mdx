@@ -1,0 +1,305 @@
+---
+title: "模型评估指标详解"
+description: "深入掌握分类与回归任务的各类评估指标：精确率、召回率、F1、ROC/AUC、MSE/MAE/R-squared 及其适用场景"
+part: "06-practical-skills"
+order: 1
+difficulty: "intermediate"
+estimatedMinutes: 35
+objectives:
+  - "理解并计算分类任务中的准确率、精确率、召回率、F1-Score"
+  - "掌握 ROC 曲线与 AUC 的含义和绘制方法"
+  - "了解 PR 曲线及其在不平衡数据中的优势"
+  - "计算回归任务的 MSE、RMSE、MAE、R-squared、MAPE"
+  - "能够根据业务场景选择合适的评估指标"
+  - "掌握多分类场景下的 macro、micro、weighted 平均策略"
+prerequisites: ["python-basics", "training-dnn", "cnn-pytorch"]
+keywords: ["evaluation-metrics", "precision-recall", "roc-auc", "f1-score", "regression-metrics"]
+---
+
+# 一、为什么评估指标很重要
+
+在机器学习中，模型的"好坏"完全取决于你如何定义"好"。不同的评估指标反映了模型在不同维度的表现。选择错误的指标，可能让你对一个糟糕的模型产生盲目的自信。
+
+举个极端例子：在一个欺诈检测任务中，99.9% 的交易是正常的。如果模型对所有交易都预测"正常"，准确率高达 99.9%，但这个模型毫无价值——它一个欺诈交易都检测不出来。
+
+```python
+import torch
+import numpy as np
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, roc_curve, precision_recall_curve,
+    average_precision_score, confusion_matrix,
+    mean_squared_error, mean_absolute_error, r2_score
+)
+import matplotlib.pyplot as plt
+
+# 模拟一个不平衡的二分类场景
+np.random.seed(42)
+n_samples = 1000
+n_positive = 10  # 只有 1% 的正样本
+
+y_true = np.zeros(n_samples, dtype=int)
+y_true[:n_positive] = 1
+np.random.shuffle(y_true)
+
+# 一个"全预测为负"的模型
+y_pred_all_neg = np.zeros(n_samples, dtype=int)
+
+print(f"正样本比例: {y_true.mean():.4f}")
+print(f"全预测为负的准确率: {accuracy_score(y_true, y_pred_all_neg):.4f}")
+```
+
+# 二、混淆矩阵：一切指标的基础
+
+混淆矩阵（Confusion Matrix）是分类指标的根本。对于二分类问题：
+
+|                | 预测为正 | 预测为负 |
+|----------------|----------|----------|
+| **实际为正**    | TP       | FN       |
+| **实际为负**    | FP       | TN       |
+
+- **TP (True Positive)**：真正例，预测为正且实际为正
+- **FP (False Positive)**：假正例，预测为正但实际为负（误报）
+- **FN (False Negative)**：假负例，预测为负但实际为正（漏报）
+- **TN (True Negative)**：真负例，预测为负且实际为负
+
+```python
+# 生成一个稍好一点的预测
+y_scores = np.random.rand(n_samples)  # 模型的概率输出
+# 让正样本的概率稍高一些
+y_scores[y_true == 1] += 0.3
+y_scores = np.clip(y_scores, 0, 1)
+y_pred = (y_scores > 0.5).astype(int)
+
+cm = confusion_matrix(y_true, y_pred)
+print("混淆矩阵:")
+print(f"               预测负  预测正")
+print(f"实际负         {cm[0,0]:6d}  {cm[0,1]:6d}")
+print(f"实际正         {cm[1,0]:6d}  {cm[1,1]:6d}")
+```
+
+## 2.1 准确率 (Accuracy)
+
+$$\text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}$$
+
+准确率是最直观的指标，但它对类别不平衡极其敏感。**从不单独使用准确率来评估不平衡数据上的模型。**
+
+## 2.2 精确率 (Precision)
+
+$$\text{Precision} = \frac{TP}{TP + FP}$$
+
+精确率回答的问题是：**在所有被模型预测为正的样本中，有多少是真正的正样本？**
+
+当假正例（FP）的代价很高时，应该关注精确率。例如：
+- 垃圾邮件过滤：把重要邮件误判为垃圾邮件的代价很高
+- 搜索推荐：给用户推荐不相关的内容会损害体验
+
+## 2.3 召回率 (Recall)
+
+$$\text{Recall} = \frac{TP}{TP + FN}$$
+
+召回率回答的问题是：**在所有真正的正样本中，模型成功找出了多少？**
+
+当假负例（FN）的代价很高时，应该关注召回率。例如：
+- 疾病筛查：漏掉一个患者可能危及生命
+- 欺诈检测：漏掉一笔欺诈交易的代价巨大
+
+## 2.4 F1-Score
+
+精确率和召回率通常是一对矛盾——提高阈值可以提高精确率但降低召回率。F1-Score 是二者的调和平均：
+
+$$\text{F1} = 2 \times \frac{\text{Precision} \times \text{Recall}}{\text{Precision} + \text{Recall}}$$
+
+使用调和平均（而非算术平均）的原因是：F1 只在精确率和召回率都高时才高。如果其中一个为 0，F1 也为 0。
+
+```python
+print(f"准确率 (Accuracy):  {accuracy_score(y_true, y_pred):.4f}")
+print(f"精确率 (Precision): {precision_score(y_true, y_pred):.4f}")
+print(f"召回率 (Recall):    {recall_score(y_true, y_pred):.4f}")
+print(f"F1-Score:           {f1_score(y_true, y_pred):.4f}")
+```
+
+# 三、ROC 曲线与 AUC
+
+## 3.1 ROC 曲线
+
+ROC 曲线（Receiver Operating Characteristic）描绘了不同分类阈值下 **TPR（召回率）** 与 **FPR** 的关系：
+
+$$\text{TPR} = \frac{TP}{TP + FN}, \quad \text{FPR} = \frac{FP}{FP + TN}$$
+
+曲线从左下角 (0,0) 延伸到右上角 (1,1)。完美的分类器会紧贴左上角；随机猜测对应对角线。
+
+## 3.2 AUC-ROC
+
+AUC（Area Under Curve）是 ROC 曲线下的面积，取值范围 [0, 1]：
+- **AUC = 1.0**：完美分类器
+- **AUC = 0.5**：等价于随机猜测
+- **AUC < 0.5**：比随机还差（可以把预测反过来用）
+- 一般经验：**AUC > 0.8** 表示模型有较好的区分能力
+
+```python
+fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+auc = roc_auc_score(y_true, y_scores)
+
+plt.figure(figsize=(8, 6))
+plt.plot(fpr, tpr, 'b-', linewidth=2, label=f'ROC (AUC = {auc:.3f})')
+plt.plot([0, 1], [0, 1], 'r--', linewidth=1, label='随机猜测')
+plt.xlabel('假正率 (FPR)', fontsize=12)
+plt.ylabel('真正率 (TPR / Recall)', fontsize=12)
+plt.title('ROC 曲线', fontsize=14)
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+## 3.3 PR 曲线与 AUC-PR（不平衡数据的首选）
+
+当正负样本严重不平衡时，ROC 曲线可能过于乐观，因为 TN（真负例）数量巨大，FPR 始终很低。此时应该使用 **PR 曲线**：
+
+```python
+precision_vals, recall_vals, _ = precision_recall_curve(y_true, y_scores)
+avg_precision = average_precision_score(y_true, y_scores)
+
+plt.figure(figsize=(8, 6))
+plt.plot(recall_vals, precision_vals, 'g-', linewidth=2,
+         label=f'PR 曲线 (AP = {avg_precision:.3f})')
+plt.xlabel('召回率 (Recall)', fontsize=12)
+plt.ylabel('精确率 (Precision)', fontsize=12)
+plt.title('PR 曲线 (更适合不平衡数据)', fontsize=14)
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+# 四、多分类指标：Macro / Micro / Weighted
+
+对于多分类问题，需要将二分类指标推广。三种常见的平均策略：
+
+```python
+# 模拟三分类场景
+y_true_multi = np.array([0, 0, 1, 1, 2, 2, 0, 1, 2, 0])
+y_pred_multi = np.array([0, 1, 1, 1, 2, 0, 0, 1, 2, 1])
+
+print("Macro (宏平均): 对每个类别分别计算指标，然后取平均（小类权重相同）")
+print(f"  Precision: {precision_score(y_true_multi, y_pred_multi, average='macro'):.4f}")
+print(f"  Recall:    {recall_score(y_true_multi, y_pred_multi, average='macro'):.4f}")
+print(f"  F1:        {f1_score(y_true_multi, y_pred_multi, average='macro'):.4f}")
+
+print("\nMicro (微平均): 汇总所有类别的 TP/FP/FN 再计算（大类主导）")
+print(f"  Precision: {precision_score(y_true_multi, y_pred_multi, average='micro'):.4f}")
+print(f"  Recall:    {recall_score(y_true_multi, y_pred_multi, average='micro'):.4f}")
+print(f"  F1:        {f1_score(y_true_multi, y_pred_multi, average='micro'):.4f}")
+
+print("\nWeighted (加权平均): 按每个类别的样本数加权平均")
+print(f"  Precision: {precision_score(y_true_multi, y_pred_multi, average='weighted'):.4f}")
+print(f"  Recall:    {recall_score(y_true_multi, y_pred_multi, average='weighted'):.4f}")
+print(f"  F1:        {f1_score(y_true_multi, y_pred_multi, average='weighted'):.4f}")
+```
+
+- **Macro**：小类和大类一视同仁。当你关心每一个类别的表现时使用。
+- **Micro**：每个样本权重相同，大类自然主导结果。
+- **Weighted**：折中方案，按样本数加权。
+
+# 五、回归指标
+
+## 5.1 MSE 与 RMSE
+
+均方误差（MSE）和均方根误差（RMSE）是最常用的回归指标：
+
+$$\text{MSE} = \frac{1}{n}\sum_{i=1}^{n}(y_i - \hat{y}_i)^2$$
+
+$$\text{RMSE} = \sqrt{\text{MSE}}$$
+
+RMSE 的单位与目标变量一致，更易于解读。但由于平方项的存在，它对**离群值非常敏感**。
+
+## 5.2 MAE（对离群值更鲁棒）
+
+$$\text{MAE} = \frac{1}{n}\sum_{i=1}^{n}|y_i - \hat{y}_i|$$
+
+MAE 对离群值不那么敏感，当你不想让大误差过度惩罚模型时优先选择。
+
+## 5.3 R-squared (决定系数)
+
+$$R^2 = 1 - \frac{\sum_{i=1}^{n}(y_i - \hat{y}_i)^2}{\sum_{i=1}^{n}(y_i - \bar{y})^2}$$
+
+$R^2$ 衡量的是模型解释了目标变量多少比例的方差。值越接近 1 越好，负值说明模型比直接预测均值还差。
+
+## 5.4 MAPE（平均绝对百分比误差）
+
+$$\text{MAPE} = \frac{100\%}{n}\sum_{i=1}^{n}\left|\frac{y_i - \hat{y}_i}{y_i}\right|$$
+
+MAPE 给出了误差的相对百分比，易于向非技术人员解释。但它不能处理 $y_i = 0$ 的情况。
+
+```python
+# 模拟回归预测
+np.random.seed(42)
+y_true_reg = np.random.randn(200) * 10 + 50
+y_pred_reg = y_true_reg + np.random.randn(200) * 3
+
+mse = mean_squared_error(y_true_reg, y_pred_reg)
+rmse = np.sqrt(mse)
+mae = mean_absolute_error(y_true_reg, y_pred_reg)
+r2 = r2_score(y_true_reg, y_pred_reg)
+mape = np.mean(np.abs((y_true_reg - y_pred_reg) / y_true_reg)) * 100
+
+print(f"MSE:  {mse:.4f}")
+print(f"RMSE: {rmse:.4f}  (与目标变量单位一致)")
+print(f"MAE:  {mae:.4f}  (对离群值更鲁棒)")
+print(f"R²:   {r2:.4f}  (越接近1越好)")
+print(f"MAPE: {mape:.2f}% (相对误差)")
+```
+
+## 5.5 与 PyTorch 结合使用
+
+```python
+import torch.nn as nn
+
+# 在 PyTorch 训练循环中使用
+model = nn.Linear(10, 1)
+criterion = nn.MSELoss()  # PyTorch 内置的 MSE
+
+# 手动实现 MAE
+def mae_loss(y_pred, y_true):
+    return torch.mean(torch.abs(y_pred - y_true))
+
+# 手动实现 R-squared
+def r2_score_torch(y_pred, y_true):
+    ss_res = torch.sum((y_true - y_pred) ** 2)
+    ss_tot = torch.sum((y_true - torch.mean(y_true)) ** 2)
+    return 1 - ss_res / ss_tot
+
+# 示例
+y_t = torch.randn(100, 1)
+y_p = torch.randn(100, 1)
+print(f"PyTorch MSE: {criterion(y_p, y_t).item():.4f}")
+print(f"PyTorch MAE: {mae_loss(y_p, y_t).item():.4f}")
+print(f"PyTorch R²:  {r2_score_torch(y_p, y_t).item():.4f}")
+```
+
+# 六、如何选择评估指标：决策指南
+
+| 场景 | 推荐指标 | 原因 |
+|------|----------|------|
+| 数据平衡的分类任务 | Accuracy + F1 | 直观且全面 |
+| 数据不平衡 + 关注正类 | Precision + Recall + F1 | 准确率会误导 |
+| 数据不平衡 + 比较多个模型 | AUC-PR | 更真实反映排序能力 |
+| 需要选择最优阈值 | ROC 曲线 | 可视化不同阈值下的权衡 |
+| 假正例代价高（垃圾邮件） | Precision | 宁可漏掉也不误判 |
+| 假负例代价高（疾病检测） | Recall | 宁可误判也不漏掉 |
+| 多分类（关注各类） | Macro F1 | 每个类别同等重要 |
+| 多分类（关注总体） | Micro F1 | 按样本数加权 |
+| 回归（无离群值） | RMSE | 可微，优化友好 |
+| 回归（有离群值） | MAE | 鲁棒，不受极端值严重影响 |
+| 回归（向非技术汇报） | R² + MAPE | 直观易懂 |
+
+# 七、关键要点
+
+1. **绝不要**在不平衡数据上只报告准确率。
+2. **Precision** 和 **Recall** 是相互制约的，具体取舍取决于业务需求。
+3. **F1-Score** 在精确率和召回率之间取调和平均，适合需要兼顾二者的场景。
+4. **ROC-AUC** 衡量模型的排序能力，但在严重不平衡数据上可能过于乐观。
+5. **PR-AUC** 是不平衡数据上更可靠的指标。
+6. 多分类时注意 **macro / micro / weighted** 的选择，它们对应不同的关注点。
+7. **RMSE** 比 **MAE** 对离群值更敏感；如果离群值很重要，选 RMSE，否则选 MAE。
+8. 回归中用 **R²** 可以直观理解模型的"解释力"百分比。
+9. 最终选择指标的标准永远是：**什么指标最贴近业务目标？**

@@ -1,0 +1,287 @@
+---
+title: "CNN 卷积神经网络基础"
+description: "从卷积运算、池化到感受野，深入理解 CNN 的核心组件，并动手实现边缘检测等可视化示例。"
+part: "03-supervised-learning"
+order: 9
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "理解卷积运算的数学原理：核/滤波器、滑动窗口、特征图"
+  - "掌握步长、填充、空洞卷积等关键超参数"
+  - "理解多通道卷积与参数共享机制"
+  - "掌握池化层的降采样功能与感受野概念"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra", "dnn-architecture"]
+keywords: ["CNN", "卷积", "池化", "感受野", "平移等变性", "特征图"]
+---
+
+## 卷积运算
+
+卷积神经网络（Convolutional Neural Network, CNN）的核心操作是**卷积**。一个卷积核（kernel/filter）在输入图像上滑动，每次与局部区域做逐元素乘积求和，生成特征图（feature map）。
+
+数学上，二维离散卷积定义为：
+
+$$
+S(i, j) = (I * K)(i, j) = \sum_m \sum_n I(i+m, j+n) \, K(m, n)
+$$
+
+其中 $I$ 是输入图像，$K$ 是卷积核，$S$ 是输出的特征图。
+
+### 手动实现卷积
+
+```python
+import torch
+import torch.nn.functional as F
+import numpy as np
+
+def convolution2d(image, kernel):
+    """
+    手动实现二维卷积（valid 模式，无 padding）
+    image: (H, W)
+    kernel: (kH, kW)
+    返回: 特征图
+    """
+    H, W = image.shape
+    kH, kW = kernel.shape
+    out_H = H - kH + 1
+    out_W = W - kW + 1
+    output = np.zeros((out_H, out_W))
+    for i in range(out_H):
+        for j in range(out_W):
+            region = image[i:i+kH, j:j+kW]
+            output[i, j] = np.sum(region * kernel)
+    return output
+
+# 测试：应用水平边缘检测 Sobel 滤波器
+image = np.array([
+    [10, 10, 10, 0, 0, 0],
+    [10, 10, 10, 0, 0, 0],
+    [10, 10, 10, 0, 0, 0],
+    [10, 10, 10, 0, 0, 0],
+    [10, 10, 10, 0, 0, 0],
+    [10, 10, 10, 0, 0, 0],
+], dtype=np.float32)
+
+sobel_x = np.array([[-1, 0, 1],
+                     [-2, 0, 2],
+                     [-1, 0, 1]], dtype=np.float32)
+
+feature_map = convolution2d(image, sobel_x)
+print("水平边缘检测结果:\n", feature_map)
+# 中间列正值表示检测到从左到右的边缘（暗→亮）
+```
+
+### PyTorch 中的卷积
+
+PyTorch 提供 `torch.nn.functional.conv2d`（函数式）和 `nn.Conv2d`（层）。它们的底层实现高度优化（im2col + GEMM / Winograd）：
+
+```python
+import torch
+
+# 输入: (batch, channels, height, width)
+input_tensor = torch.randn(1, 1, 6, 6)
+# 定义卷积核: (out_channels, in_channels, kH, kW)
+kernel = torch.tensor(sobel_x).reshape(1, 1, 3, 3)
+
+# F.conv2d 的 weight 格式: (out_channels, in_channels, kH, kW)
+output = F.conv2d(input_tensor, kernel)
+print("输出形状:", output.shape)  # (1, 1, 4, 4)
+```
+
+## 步长（Stride）和填充（Padding）
+
+**步长**控制卷积核每次滑动的距离。步长越大，输出尺寸越小。
+
+**填充**在输入边缘补零，使输出尺寸可控。两种常见模式：
+
+- **VALID**：不填充，输出尺寸 `(H - kH) / stride + 1`
+- **SAME**：填充使输出尺寸与输入相同，`padding = (kH - 1) / 2`
+
+输出尺寸公式（每边填充为 $P$）：
+
+$$
+H_{out} = \left\lfloor \frac{H_{in} + 2P - kH}{\text{stride}} \right\rfloor + 1
+$$
+
+```python
+# SAME padding 示例
+input_tensor = torch.randn(1, 3, 32, 32)
+conv_same = torch.nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
+out_same = conv_same(input_tensor)
+print("SAME padding 输出:", out_same.shape)  # (1, 16, 32, 32)
+
+# VALID padding（stride=2，降采样）
+conv_valid = torch.nn.Conv2d(3, 16, kernel_size=3, stride=2, padding=0)
+out_valid = conv_valid(input_tensor)
+print("VALID / stride=2 输出:", out_valid.shape)  # (1, 16, 15, 15)
+```
+
+## 空洞卷积（Dilated Convolution）
+
+扩张卷积在不增加参数的情况下扩大感受野。扩张率 $d$ 表示卷积核元素之间的间距：
+
+```python
+# dilation=2：核元素间插入 1 个零，3×3 核等效感受野为 5×5
+conv_dilated = torch.nn.Conv2d(3, 16, kernel_size=3, dilation=2, padding=2)
+out_d = conv_dilated(input_tensor)
+print("dilation=2 输出:", out_d.shape)  # (1, 16, 32, 32)
+```
+
+空洞卷积常用于语义分割（如 DeepLab），在保持特征图分辨率的同时扩大感受野。
+
+## 多通道卷积
+
+真实图像有多通道（RGB = 3 通道）。一个卷积层从 $C_{in}$ 个输入通道映射到 $C_{out}$ 个输出通道：
+
+- 每个输出通道对应一个大小为 `(C_in, kH, kW)` 的三维卷积核
+- 每个输出通道结果 = 各输入通道卷积结果之和
+
+```python
+# 输入: 3 通道 RGB 图像
+rgb_image = torch.randn(1, 3, 28, 28)
+
+# 3 输入通道 → 64 输出通道
+conv_layer = torch.nn.Conv2d(in_channels=3, out_channels=64,
+                               kernel_size=3, padding=1)
+features = conv_layer(rgb_image)
+print("多通道卷积输出:", features.shape)  # (1, 64, 28, 28)
+
+# 查看参数量: 每个输出通道有 C_in * kH * kW 个权重 + 1 个偏置
+num_params = 64 * (3 * 3 * 3 + 1)
+print(f"该层参数量: {num_params:,}")  # 1,792
+```
+
+## 参数共享与平移等变性
+
+CNN 的两个关键特性使其在图像任务中极为高效：
+
+**参数共享**：同一个卷积核在整张图像上滑动使用，权重固定。这使得参数量与输入尺寸无关——一个 3×3 卷积核只有 9 个权重，无论输入是 28×28 还是 1024×1024。
+
+**平移等变性（Translation Equivariance）**：若输入图像发生平移，输出的特征图也相应平移。这意味着无论目标出现在图像的左上角还是右下角，同一个卷积核都能检测到它。
+
+```python
+# 直观验证平移等变性
+image = torch.zeros(1, 1, 8, 8)
+image[0, 0, 2, 2] = 1.0  # 亮点在 (2,2)
+image_shifted = torch.zeros(1, 1, 8, 8)
+image_shifted[0, 0, 5, 5] = 1.0  # 亮点移到 (5,5)
+
+conv = torch.nn.Conv2d(1, 1, 3, padding=0, bias=False)
+conv.weight.data.fill_(1.0)  # 全 1 核，功能为局部求和
+
+out1 = conv(image)
+out2 = conv(image_shifted)
+print("原图输出 (3,3) 处的值:", out1[0, 0, 1, 1].item())
+print("平移后 (6,6) 处的值:", out2[0, 0, 4, 4].item())
+# 两者相等——响应随目标平移而平移
+```
+
+## 池化层（Pooling）
+
+池化层对特征图进行降采样，减少空间维度、增大感受野、提供局部平移不变性。
+
+**最大池化（Max Pooling）**：取每个窗口的最大值，保留最显著特征。
+**平均池化（Average Pooling）**：取窗口的均值，常用于网络末端的全局池化。
+
+```python
+feature_map = torch.randn(1, 64, 32, 32)
+
+# 2×2 最大池化，步长 2，将 32×32 降采样为 16×16
+max_pool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
+pooled = max_pool(feature_map)
+print("最大池化后:", pooled.shape)  # (1, 64, 16, 16)
+
+# 全局平均池化：将任意大小的特征图变为 1×1
+gap = torch.nn.AdaptiveAvgPool2d((1, 1))
+global_feat = gap(feature_map)
+print("全局平均池化后:", global_feat.shape)  # (1, 64, 1, 1)
+```
+
+池化不引入额外参数（无权重），纯粹是下采样操作。
+
+## 感受野（Receptive Field）
+
+感受野是指特征图上的一点对应到原始输入图像上的区域大小。堆叠卷积层使感受野逐层增大：
+
+- 第 1 层 3×3 卷积：感受野 3×3
+- 第 2 层 3×3 卷积：感受野 5×5
+- 第 3 层 3×3 卷积：感受野 7×7
+
+一般地，$L$ 层 $k \times k$ 卷积的感受野为 $1 + L \times (k-1)$。
+
+深层神经元能"看到"更大的输入区域，学习更全局的特征。这是 CNN 层级特征提取的基础：浅层检测边缘/纹理，中层检测形状/部件，深层检测完整物体。
+
+```python
+def compute_receptive_field(layers_config):
+    """
+    计算多个卷积+池化层后的感受野
+    layers_config: [(kernel_size, stride), ...] 列表
+    """
+    rf = 1  # 初始感受野
+    jump = 1  # 特征图上相邻点对应的输入间距
+    for k, s in layers_config:
+        rf = rf + (k - 1) * jump
+        jump = jump * s
+    return rf
+
+# VGG 前几层: 2×[conv3] + pool2（步长 2）
+config = [(3, 1), (3, 1), (2, 2)]
+rf = compute_receptive_field(config)
+print(f"VGG 前三层后的感受野: {rf}×{rf}")  # 6×6
+```
+
+## 边缘检测可视化
+
+下面用真实图像演示 CNN 如何提取边缘特征：
+
+```python
+import matplotlib.pyplot as plt
+from PIL import Image
+import torchvision.transforms as T
+
+# 创建一个简单的合成图像（或用真实图片）
+img_array = np.zeros((100, 100), dtype=np.float32)
+img_array[30:70, 30:70] = 255  # 白色方块在黑色背景上
+
+# 定义边缘检测核
+sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=np.float32)
+sobel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=np.float32)
+edge_enhance = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+
+# 应用不同卷积核
+img_tensor = torch.from_numpy(img_array).unsqueeze(0).unsqueeze(0)
+kernel_x = torch.from_numpy(sobel_x).unsqueeze(0).unsqueeze(0)
+kernel_y = torch.from_numpy(sobel_y).unsqueeze(0).unsqueeze(0)
+
+edges_x = F.conv2d(img_tensor, kernel_x)
+edges_y = F.conv2d(img_tensor, kernel_y)
+edges_magnitude = torch.sqrt(edges_x.pow(2) + edges_y.pow(2))
+
+print("水平边缘检测 - 最值:", edges_x.min().item(), edges_x.max().item())
+print("垂直边缘检测 - 最值:", edges_y.min().item(), edges_y.max().item())
+print("边缘强度图 - 形状:", edges_magnitude.shape)
+
+# 使用 matplotlib 可视化
+fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+axes[0].imshow(img_array, cmap='gray')
+axes[0].set_title("原图")
+axes[1].imshow(edges_x.squeeze(), cmap='gray')
+axes[1].set_title("水平边缘（Sobel X）")
+axes[2].imshow(edges_y.squeeze(), cmap='gray')
+axes[2].set_title("垂直边缘（Sobel Y）")
+axes[3].imshow(edges_magnitude.squeeze(), cmap='gray')
+axes[3].set_title("边缘强度")
+plt.tight_layout()
+plt.savefig("edge_detection_demo.png", dpi=100)
+plt.close()
+print("边缘检测可视化已保存")
+```
+
+## 为什么 CNN 适合图像？
+
+总结 CNN 在图像任务上的三大优势：
+
+1. **局部模式检测**：卷积核只关注局部邻域，符合图像的局部相关性——相邻像素比远距离像素关联更强。
+
+2. **层级特征抽象**：堆叠多个卷积层形成层次结构。浅层学习边缘和颜色块，中层学习纹理和形状，深层学习语义概念（如人脸、车轮）。
+
+3. **参数效率**：相比全连接层，卷积的参数共享使参数量大幅减少。对于 224×224×3 的输入，一个 3×3×64 的卷积层仅有 1,792 个参数，而对应的全连接层将有 224×224×3×64 ≈ 960 万个参数。

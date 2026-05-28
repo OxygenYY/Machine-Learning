@@ -1,0 +1,322 @@
+---
+title: "交叉验证"
+description: "掌握 K-Fold、分层 K-Fold、时间序列分割和嵌套交叉验证，学会在 PyTorch 中进行可靠的模型评估"
+part: "06-practical-skills"
+order: 2
+difficulty: "intermediate"
+estimatedMinutes: 35
+objectives:
+  - "理解为什么单次划分不足以可靠评估模型"
+  - "掌握 K-Fold 和 Stratified K-Fold 的原理与实现"
+  - "了解 Leave-One-Out 和时间序列交叉验证的使用场景"
+  - "理解嵌套交叉验证在超参数调优中的作用"
+  - "学会在 PyTorch 训练循环中集成交叉验证"
+  - "识别交叉验证中的常见陷阱：数据泄露"
+prerequisites: ["python-basics", "training-dnn", "evaluation-metrics"]
+keywords: ["cross-validation", "k-fold", "stratified", "nested-cv", "data-leakage"]
+---
+
+# 一、为什么单次划分不够？
+
+将数据随机划分为 80% 训练集和 20% 测试集是一种常见的做法。但问题在于：**不同的随机划分可能产生差异很大的评估结果。**
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit, cross_val_score
+from sklearn.datasets import make_classification
+import matplotlib.pyplot as plt
+
+# 演示：同一个模型在不同随机划分上的表现差异
+np.random.seed(None)
+
+# 生成小规模数据集来放大方差
+X, y = make_classification(n_samples=300, n_features=20, n_informative=5,
+                           n_redundant=5, random_state=42)
+
+from sklearn.linear_model import LogisticRegression
+
+accuracies = []
+for seed in range(20):
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=seed
+    )
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_train, y_train)
+    accuracies.append(model.score(X_test, y_test))
+
+print(f"20 次不同随机划分的准确率:")
+print(f"  均值: {np.mean(accuracies):.4f}")
+print(f"  标准差: {np.std(accuracies):.4f}")
+print(f"  最小值: {np.min(accuracies):.4f}")
+print(f"  最大值: {np.max(accuracies):.4f}")
+print(f"  极差: {np.max(accuracies) - np.min(accuracies):.4f}")
+print(f"\n结论: 仅凭一次划分，你报出的准确率可能偏差 {np.std(accuracies):.4f}")
+```
+
+交叉验证（Cross-Validation, CV）通过多次划分并取平均，给出更稳定、更可靠的性能估计。
+
+# 二、K-Fold 交叉验证
+
+## 2.1 基本原理
+
+将数据等分为 K 份（K 个 Fold）。每次用其中 K-1 份训练，剩下 1 份验证。重复 K 次，每次选择不同的 Fold 作为验证集，最终报告 K 次结果的均值和标准差。
+
+```python
+from sklearn.model_selection import KFold
+
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+
+fold_accuracies = []
+for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = y[train_idx], y[val_idx]
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_train, y_train)
+    acc = model.score(X_val, y_val)
+    fold_accuracies.append(acc)
+    print(f"Fold {fold+1}: Accuracy = {acc:.4f}")
+
+print(f"\nK-Fold 交叉验证结果:")
+print(f"  均值 ± 标准差: {np.mean(fold_accuracies):.4f} ± {np.std(fold_accuracies):.4f}")
+```
+
+K 的选择：
+- **K=5 或 K=10** 是最常用的选择，在偏差和方差之间取得良好平衡
+- K 越大，训练数据越多，偏差越小，但方差越大（各 Fold 之间的训练集高度重叠）
+- K 越小，偏差越大，但计算量也更小
+
+# 三、分层 K-Fold (Stratified K-Fold)
+
+标准 K-Fold 随机划分可能导致某些 Fold 中的类别分布与原始数据不一致。**StratifiedKFold 保证每个 Fold 中的类别比例与整体数据相同**，这对不平衡数据尤为重要。
+
+```python
+# 创建不平衡数据
+X_imb, y_imb = make_classification(n_samples=500, n_features=20, weights=[0.9, 0.1],
+                                    random_state=42)
+print(f"整体正样本比例: {y_imb.mean():.4f}")
+
+# 普通 K-Fold vs Stratified K-Fold
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+print("\n普通 K-Fold 各类别比例:")
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_imb)):
+    print(f"  Fold {fold+1}: 训练集 {y_imb[train_idx].mean():.4f}, 验证集 {y_imb[val_idx].mean():.4f}")
+
+print("\n分层 K-Fold 各类别比例:")
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_imb, y_imb)):
+    print(f"  Fold {fold+1}: 训练集 {y_imb[train_idx].mean():.4f}, 验证集 {y_imb[val_idx].mean():.4f}")
+```
+
+**规则**：对于分类任务，除非你有特别的理由，否则**始终使用 StratifiedKFold**。
+
+# 四、特殊情况：Leave-One-Out 与时间序列
+
+## 4.1 Leave-One-Out CV (LOOCV)
+
+当数据非常稀缺时（例如只有几十个样本），可以使用留一法：每次留出 1 个样本作为验证，其余全部用于训练。K 等于样本数。
+
+```python
+from sklearn.model_selection import LeaveOneOut
+
+# 仅在小数据上演示
+X_small, y_small = make_classification(n_samples=30, n_features=5, random_state=42)
+loo = LeaveOneOut()
+accs = []
+for train_idx, val_idx in loo.split(X_small):
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X_small[train_idx], y_small[train_idx])
+    accs.append(model.score(X_small[val_idx], y_small[val_idx]))
+print(f"LOOCV: {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+```
+
+## 4.2 时间序列交叉验证
+
+对于时间序列数据，不能随机打乱——因为未来的信息不能用于预测过去。TimeSeriesSplit 保证训练集的时间索引始终在验证集之前。
+
+```python
+# 模拟时间序列数据
+n_time = 100
+X_time = np.arange(n_time).reshape(-1, 1)
+y_time = np.sin(np.arange(n_time) * 0.1) + np.random.randn(n_time) * 0.1
+
+tscv = TimeSeriesSplit(n_splits=5)
+for fold, (train_idx, val_idx) in enumerate(tscv.split(X_time)):
+    train_start, train_end = train_idx[0], train_idx[-1]
+    val_start, val_end = val_idx[0], val_idx[-1]
+    print(f"Fold {fold+1}: 训练 [{train_start}, {train_end}], 验证 [{val_start}, {val_end}]")
+    print(f"  验证集的时间索引全部大于训练集: {val_start > train_end}")
+```
+
+# 五、交叉验证与 PyTorch 完整实战
+
+以下是一个完整的图像分类交叉验证示例：
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset, Subset
+from sklearn.model_selection import StratifiedKFold
+from sklearn.datasets import load_digits
+from sklearn.preprocessing import StandardScaler
+import numpy as np
+
+# 准备数据
+digits = load_digits()
+X_data = digits.data.astype(np.float32)
+y_data = digits.target.astype(np.int64)
+
+scaler = StandardScaler()
+X_data = scaler.fit_transform(X_data)
+
+X_tensor = torch.tensor(X_data)
+y_tensor = torch.tensor(y_data)
+
+# 定义简单的 MLP
+class SimpleMLP(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, num_classes)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# 训练函数
+def train_one_fold(model, train_loader, val_loader, epochs=30, lr=0.01):
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    for epoch in range(epochs):
+        model.train()
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(batch_X), batch_y)
+            loss.backward()
+            optimizer.step()
+
+    # 验证
+    model.eval()
+    correct, total = 0, 0
+    with torch.no_grad():
+        for batch_X, batch_y in val_loader:
+            outputs = model(batch_X)
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == batch_y).sum().item()
+            total += batch_y.size(0)
+    return correct / total
+
+# 交叉验证主循环
+n_splits = 5
+skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+fold_results = []
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_data, y_data)):
+    print(f"\n===== Fold {fold+1}/{n_splits} =====")
+
+    # 创建 DataLoader
+    train_dataset = TensorDataset(X_tensor[train_idx], y_tensor[train_idx])
+    val_dataset = TensorDataset(X_tensor[val_idx], y_tensor[val_idx])
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+
+    # 每个 Fold 重新初始化模型
+    model = SimpleMLP(input_dim=64, num_classes=10)
+    acc = train_one_fold(model, train_loader, val_loader,
+                         epochs=30, lr=0.001)
+    fold_results.append(acc)
+    print(f"Fold {fold+1} 验证准确率: {acc:.4f}")
+
+# 汇总结果
+print(f"\n{'='*50}")
+print(f"交叉验证最终结果:")
+print(f"  均值: {np.mean(fold_results):.4f}")
+print(f"  标准差: {np.std(fold_results):.4f}")
+print(f"  95% 置信区间: [{np.mean(fold_results) - 1.96*np.std(fold_results)/np.sqrt(n_splits):.4f}, "
+      f"{np.mean(fold_results) + 1.96*np.std(fold_results)/np.sqrt(n_splits):.4f}]")
+```
+
+# 六、嵌套交叉验证 (Nested CV)
+
+当我们既要选择超参数，又要评估泛化能力时，需要在交叉验证内部再嵌套一层交叉验证：
+
+```python
+from sklearn.model_selection import GridSearchCV, cross_val_score
+
+# 外层 CV：评估模型选择过程的泛化性能
+outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+# 内层 CV：选择最优超参数
+inner_cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+outer_scores = []
+for fold, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+
+    # 在内层进行超参数搜索
+    param_grid = {'C': [0.01, 0.1, 1.0, 10.0]}
+    grid_search = GridSearchCV(
+        LogisticRegression(max_iter=1000), param_grid,
+        cv=inner_cv, scoring='accuracy'
+    )
+    grid_search.fit(X_train, y_train)
+
+    # 用最优超参数在外层测试集上评估
+    best_model = grid_search.best_estimator_
+    score = best_model.score(X_test, y_test)
+    outer_scores.append(score)
+    print(f"Fold {fold+1}: 最优 C={grid_search.best_params_['C']}, 测试准确率={score:.4f}")
+
+print(f"\n嵌套 CV 结果: {np.mean(outer_scores):.4f} ± {np.std(outer_scores):.4f}")
+```
+
+**关键理解**：外层 CV 评估的不是某个具体模型，而是**包括超参数选择在内的整个建模流程**。这给出了模型选择方法本身的泛化能力估计。
+
+# 七、常见陷阱
+
+## 7.1 数据泄露 (Data Leakage)
+
+这是交叉验证中最常见的错误。**所有数据预处理（标准化、特征选择、缺失值填充等）都必须在每个 Fold 内部独立进行**，绝不能在整个数据集上预处理后才划分 Fold。
+
+```python
+# 错误做法：在整个数据集上标准化，再划分 Fold
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)  # ❌ 用到了所有数据的信息，包括验证集！
+# 然后再划分 Fold —— 这已经泄露了验证集的统计信息
+
+# 正确做法：在 CV 循环内对每个 Fold 分别标准化
+for train_idx, val_idx in kf.split(X):
+    X_train, X_val = X[train_idx], X[val_idx]
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)   # ✅ 只在训练集上 fit
+    X_val = scaler.transform(X_val)            # ✅ 用训练集的统计量 transform 验证集
+```
+
+## 7.2 不要用 CV 来选择模型
+
+交叉验证的目的是**评估**模型的泛化性能，而非**选择**模型。如果用 CV 在多轮模型中选择最好的一次，那么 CV 的结果本身就被"过拟合"了。模型选择应该使用嵌套 CV 或独立的验证集。
+
+## 7.3 报告完整结果
+
+永远不要只报告均值——标准差同样重要。一个"均值 90%、标准差 5%"的模型和一个"均值 90%、标准差 0.5%"的模型，稳定性天差地别。
+
+# 八、关键要点
+
+1. 单次 train/test split 的评估结果有较大方差，交叉验证给出更可靠的估计。
+2. K-Fold 是标准做法，K=5 或 K=10 是常见选择。
+3. 分类任务中优先使用 StratifiedKFold 保持类别比例。
+4. 时间序列数据必须使用 TimeSeriesSplit，不能随机打乱。
+5. 数据标准化等预处理必须在每个 Fold 内部进行，避免数据泄露。
+6. 嵌套 CV 用于估计"超参数选择 + 模型训练"这个完整流程的泛化性能。
+7. 报告 CV 结果时，同时给出均值和标准差（以及置信区间）。

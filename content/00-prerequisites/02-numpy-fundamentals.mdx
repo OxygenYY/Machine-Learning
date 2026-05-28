@@ -1,0 +1,586 @@
+---
+title: "NumPy 基础"
+description: "掌握 NumPy 数组操作、广播机制、矩阵运算和随机数生成——机器学习数据处理的核心工具"
+part: "00-prerequisites"
+order: 2
+difficulty: "beginner"
+estimatedMinutes: 40
+objectives:
+  - "熟练创建和操作 NumPy 数组"
+  - "掌握索引、切片和布尔索引"
+  - "理解广播机制及其规则"
+  - "使用通用函数 (ufuncs) 进行向量化计算"
+  - "掌握矩阵运算与线性代数操作"
+  - "学会使用 NumPy 的随机数生成"
+prerequisites:
+  - "python-basics"
+keywords:
+  - "numpy"
+  - "array"
+  - "broadcasting"
+  - "matrix"
+  - "random"
+---
+
+## 为什么需要 NumPy？
+
+NumPy (Numerical Python) 是 Python 科学计算生态系统的基石。在机器学习中，数据表示为多维数组（张量），模型参数是矩阵，梯度是向量——NumPy 提供了所有这些数据结构的底层支持。
+
+NumPy 的核心优势在于**向量化计算**：与其用 Python 循环逐个处理元素，NumPy 在底层用 C 语言一次性完成整块数据的运算，速度可以快 10-100 倍。在 ML 训练中处理百万级数据时，这种性能差异是决定性的。
+
+几乎所有 ML 框架（PyTorch、TensorFlow、JAX）的数组 API 都遵循 NumPy 的接口设计。学好 NumPy，就等于同时学会了所有这些框架的基础操作。
+
+## 1. 数组创建
+
+NumPy 数组 (`ndarray`) 是同类型数据的多维网格，是 ML 中最基本的数据结构。
+
+### 从列表创建
+
+```python
+import numpy as np
+
+# 一维数组（向量）
+v = np.array([1, 2, 3, 4, 5])
+print(v)        # [1 2 3 4 5]
+print(v.shape)  # (5,)
+print(v.dtype)  # int64
+
+# 二维数组（矩阵）
+M = np.array([[1, 2, 3],
+              [4, 5, 6],
+              [7, 8, 9]])
+print(M.shape)  # (3, 3)
+print(M.ndim)   # 2（维度数）
+print(M.size)   # 9（总元素数）
+
+# 指定数据类型
+weights = np.array([0.5, -0.2, 0.8], dtype=np.float32)
+print(weights.dtype)  # float32
+```
+
+### 预定义数组创建函数
+
+这些函数在 ML 中非常常用——初始化模型权重时每天都在用：
+
+```python
+# 全零数组 — 常用于偏置初始化
+zeros = np.zeros((3, 4))
+print(zeros)
+# [[0. 0. 0. 0.]
+#  [0. 0. 0. 0.]
+#  [0. 0. 0. 0.]]
+
+# 全一数组
+ones = np.ones((2, 3))
+print(ones)
+# [[1. 1. 1.]
+#  [1. 1. 1.]]
+
+# 单位矩阵 — 权重初始化、PCA 等场景
+I = np.eye(4)
+print(I.shape)  # (4, 4)
+# 对角线全是 1，其余为 0
+
+# 未初始化的数组（内容随机，但速度快）
+empty = np.empty((2, 2))
+
+# 填充指定值
+full = np.full((3, 3), 7.0)
+print(full)
+# [[7. 7. 7.]
+#  [7. 7. 7.]
+#  [7. 7. 7.]]
+```
+
+### 序列生成
+
+```python
+# arange — 类似 Python 的 range，但返回数组
+x = np.arange(0, 10, 2)
+print(x)  # [0 2 4 6 8]
+
+# linspace — 指定数量，均匀分布（常用于可视化）
+x = np.linspace(0, 1, 5)
+print(x)  # [0.   0.25 0.5  0.75 1.  ]
+
+# 当你需要画平滑曲线时的标准做法：
+x_smooth = np.linspace(-5, 5, 100)
+y_sigmoid = 1 / (1 + np.exp(-x_smooth))  # Sigmoid 函数
+```
+
+### 随机数组
+
+随机数在 ML 中无处不在——权重初始化、数据增强、Dropout、采样：
+
+```python
+# 设置随机种子（确保实验可复现！）
+np.random.seed(42)
+
+# 均匀分布 [0, 1)
+random_uniform = np.random.rand(3, 4)
+
+# 标准正态分布 N(0, 1) — Xavier/He 权重初始化的基础
+random_normal = np.random.randn(3, 4)
+
+# 整数随机
+random_int = np.random.randint(0, 10, size=(3, 4))
+
+# 指定均值和标准差的正态分布
+weights_init = np.random.normal(loc=0.0, scale=0.01, size=(100, 50))
+print(f"Mean: {weights_init.mean():.6f}")   # ~0.0
+print(f"Std:  {weights_init.std():.6f}")    # ~0.01
+```
+
+## 2. 索引与切片
+
+### 基础索引
+
+```python
+arr = np.array([[1, 2, 3, 4],
+                [5, 6, 7, 8],
+                [9, 10, 11, 12]])
+
+# 单元素索引
+print(arr[1, 2])      # 7（第 2 行第 3 列）
+
+# 切片 — 记住：切片是视图 (view)，不是拷贝！
+print(arr[:2, 1:3])
+# [[2 3]
+#  [6 7]]
+
+# 整行/整列
+print(arr[0, :])      # [1 2 3 4] 第一行
+print(arr[:, -1])     # [4 8 12]  最后一列
+
+# 步长切片
+print(arr[::2, ::2])
+# [[ 1  3]
+#  [ 9 11]]
+```
+
+### 布尔索引
+
+这是数据过滤的强大工具，在 ML 数据清洗和目标检测中尤其有用：
+
+```python
+data = np.array([2.3, 1.5, 3.6, 0.8, 4.1, 2.9])
+
+# 创建布尔掩码
+mask = data > 2.0
+print(mask)  # [ True False  True False  True  True]
+
+# 用掩码过滤
+filtered = data[mask]
+print(filtered)  # [2.3 3.6 4.1 2.9]
+
+# 复合条件
+complex_mask = (data > 2.0) & (data < 4.0)
+print(data[complex_mask])  # [2.3 3.6 2.9]
+
+# 实际 ML 应用：过滤异常值
+z_scores = (data - data.mean()) / data.std()
+outliers_removed = data[np.abs(z_scores) < 2.0]
+```
+
+### 花式索引 (Fancy Indexing)
+
+```python
+arr = np.array([10, 20, 30, 40, 50])
+
+# 用整数数组索引
+indices = [0, 2, 4]
+print(arr[indices])  # [10 30 50]
+
+# 多维花式索引
+M = np.arange(16).reshape(4, 4)
+# [[ 0  1  2  3]
+#  [ 4  5  6  7]
+#  [ 8  9 10 11]
+#  [12 13 14 15]]
+
+rows = [0, 2, 3]
+cols = [1, 3, 0]
+print(M[rows, cols])  # [1 11 12] — 取 (0,1), (2,3), (3,0)
+```
+
+## 3. 广播机制 (Broadcasting)
+
+广播是 NumPy 最强大也最容易被误解的特性。它允许不同形状的数组进行逐元素运算，无需显式复制数据。
+
+### 广播规则
+
+两个数组进行运算时，NumPy 从右向左比较它们的 shape：
+1. 如果维度大小一致，可以运算
+2. 如果其中一个维度为 1，拉伸到匹配另一个
+3. 如果维度缺失，在前面补 1，然后按规则 2 处理
+
+```python
+# 标量与数组 — 最简单的广播
+a = np.array([1, 2, 3, 4, 5])
+print(a + 10)  # [11 12 13 14 15]
+print(a * 2)   # [2 4 6 8 10]
+
+# 向量与矩阵
+M = np.array([[1, 2, 3],
+              [4, 5, 6]])
+v = np.array([10, 20, 30])
+
+# M: (2, 3)
+# v: (3,) -> (1, 3) -> 沿 axis=0 复制成 (2, 3)
+print(M + v)
+# [[11 22 33]
+#  [14 25 36]]
+```
+
+### 广播在 ML 中的应用
+
+```python
+# 数据标准化 — 几乎所有 ML 预处理的核心操作
+X = np.random.randn(100, 10)   # 100 个样本，10 个特征
+mean = X.mean(axis=0)          # shape: (10,)
+std = X.std(axis=0)            # shape: (10,)
+X_normalized = (X - mean) / std   # 广播！(100,10) / (10,) = (100,10)
+
+# 验证归一化结果
+print(f"各列均值: {X_normalized.mean(axis=0).round(6)}")  # [0. 0. 0. ...]
+print(f"各列标准差: {X_normalized.std(axis=0).round(6)}")  # [1. 1. 1. ...]
+
+# 批量计算 — 给多个样本叠加不同偏置
+samples = np.random.randn(32, 64)     # 32 个样本，64 维特征
+biases = np.random.randn(1, 64)       # 1 行 64 列偏置
+# (32, 64) + (1, 64) -> (32, 64)  广播！
+output = samples + biases
+print(output.shape)  # (32, 64)
+```
+
+### 常见广播错误
+
+```python
+# 形状不兼容的例子
+a = np.ones((3, 4))
+b = np.ones((3, 2))
+
+try:
+    c = a + b
+except ValueError as e:
+    print(f"错误: {e}")
+    # operands could not be broadcast together with shapes (3,4) (3,2)
+
+# 修复方法：使用 reshape 添加新轴
+b_reshaped = b[:, :, np.newaxis]  # (3, 2) -> (3, 2, 1)
+# 或者用 b.reshape(3, 2, 1)
+```
+
+## 4. 通用函数 (Universal Functions / ufuncs)
+
+ufuncs 是对数组进行逐元素操作的函数，用 C 实现，速度极快。在 ML 中，激活函数、损失函数、评估指标都大量依赖 ufuncs。
+
+```python
+x = np.linspace(-2, 2, 5)
+print(f"x = {x}")
+
+# 一元 ufuncs
+print(f"abs:   {np.abs(x)}")       # [2. 1. 0. 1. 2.]
+print(f"exp:   {np.exp(x)}")       # e^x — softmax 的基础
+print(f"log:   {np.log(x + 3)}")   # ln(x) — 交叉熵损失的计算
+print(f"sqrt:  {np.sqrt(np.abs(x))}")  # [1.414 1. 0. 1. 1.414]
+print(f"sin:   {np.sin(x)}")       # 三角函数
+print(f"round: {np.round(x)}")     # [-2. -1. 0. 1. 2.]
+
+# 二元 ufuncs
+a = np.array([1, 2, 3, 4])
+b = np.array([5, 6, 7, 8])
+print(f"add:      {np.add(a, b)}")      # [6 8 10 12]
+print(f"multiply: {np.multiply(a, b)}")  # [5 12 21 32]
+print(f"maximum:  {np.maximum(a, 5)}")   # [5 5 5 5] — ReLU 的基础！
+```
+
+### ML 中的激活函数示例
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def relu(x):
+    """ReLU 激活函数 — 深度学习中最常用的激活函数"""
+    return np.maximum(0, x)  # 纯 ufunc 实现，无循环！
+
+def sigmoid(x):
+    """Sigmoid 激活函数"""
+    return 1 / (1 + np.exp(-x))
+
+def tanh(x):
+    """双曲正切激活函数"""
+    return np.tanh(x)
+
+# 批量计算（模拟神经网络层的输出）
+x = np.random.randn(1000)
+activations = relu(x)
+print(f"正比例: {(activations > 0).mean():.1%}")  # 约 50%
+print(f"最大值: {activations.max():.4f}")
+print(f"稀疏度: {(activations == 0).mean():.1%}")  # 约 50% 为 0
+```
+
+## 5. 数组形状操作
+
+```python
+arr = np.arange(12)
+print(arr)  # [ 0  1  2  3  4  5  6  7  8  9 10 11]
+
+# reshape — 改变形状但保持元素数不变
+M = arr.reshape(3, 4)
+print(M)
+# [[ 0  1  2  3]
+#  [ 4  5  6  7]
+#  [ 8  9 10 11]]
+
+# 可以用 -1 让 NumPy 自动推导维度
+flat = M.reshape(-1)         # 展平
+batched = arr.reshape(-1, 2) # 任意行，2 列
+print(batched)   # shape: (6, 2)
+
+# 转置
+print(M.T)
+# [[ 0  4  8]
+#  [ 1  5  9]
+#  [ 2  6 10]
+#  [ 3  7 11]]
+
+# 维度的重新排列 — 在图像数据 (H, W, C) -> (C, H, W) 转换中很关键
+img = np.random.randn(224, 224, 3)   # HWC 格式
+img_chw = np.transpose(img, (2, 0, 1))  # 转成 CHW 格式（PyTorch 要求）
+print(img_chw.shape)  # (3, 224, 224)
+
+# 添加新轴 — 在 batch 维度中添加
+x = np.array([1, 2, 3])
+print(x.shape)           # (3,)
+print(x[np.newaxis, :].shape)  # (1, 3) — 变成 1 个样本
+print(x[:, np.newaxis].shape)  # (3, 1)
+```
+
+## 6. 聚合与统计
+
+```python
+data = np.array([[1, 2, 3],
+                 [4, 5, 6],
+                 [7, 8, 9]])
+
+# 全局统计
+print(f"Sum:  {data.sum()}")       # 45
+print(f"Mean: {data.mean():.2f}") # 5.00
+print(f"Min:  {data.min()}")      # 1
+print(f"Max:  {data.max()}")      # 9
+print(f"Std:  {data.std():.2f}")  # 2.58
+
+# 沿轴统计 — axis=0 沿行方向（对每列），axis=1 沿列方向（对每行）
+print(f"列均值: {data.mean(axis=0)}")  # [4. 5. 6.]
+print(f"行均值: {data.mean(axis=1)}")  # [2. 5. 8.]
+
+# argmax / argmin — 最大/最小值的索引（分类任务中用的是 argmax!）
+logits = np.array([0.2, 2.3, 0.1, 1.5])  # 模型输出 logits
+predicted_class = np.argmax(logits)
+print(f"预测类别: {predicted_class}")  # 1（索引 1 的值为 2.3，最大）
+
+# 累积和
+print(f"累积和: {data.cumsum()}")  # [ 1  3  6 10 15 21 28 36 45]
+```
+
+## 7. 矩阵运算与线性代数
+
+NumPy 的 `np.linalg` 模块提供了完整的线性代数功能。这些操作是神经网络的数学基础。
+
+```python
+A = np.array([[1, 2],
+              [3, 4]])
+B = np.array([[5, 6],
+              [7, 8]])
+
+# 矩阵乘法（点积）— 全连接层的前向传播核心
+# A @ B 或 np.dot(A, B) 或 np.matmul(A, B)
+C = A @ B  # 推荐用 @ 运算符
+print(C)
+# [[19 22]
+#  [43 50]]
+
+# 对比逐元素乘法
+print(A * B)
+# [[ 5 12]
+#  [21 32]]
+
+# 矩阵的逆
+A_inv = np.linalg.inv(A)
+print(A_inv)
+# [[-2.   1. ]
+#  [ 1.5 -0.5]]
+
+# 验证: A @ A_inv = I
+print(np.round(A @ A_inv, decimals=10))
+# [[1. 0.]
+#  [0. 1.]]
+
+# 行列式
+det = np.linalg.det(A)
+print(f"det(A) = {det}")  # -2.0
+
+# 特征值与特征向量
+eigenvalues, eigenvectors = np.linalg.eig(A)
+print(f"特征值: {eigenvalues}")
+# [-0.37228132  5.37228132]
+
+# SVD（奇异值分解）— PCA 和降维的基础
+U, S, Vt = np.linalg.svd(A)
+print(f"奇异值: {S}")
+# [5.4649857  0.36596619]
+
+# 解线性方程组 Ax = b
+b = np.array([5, 11])
+x = np.linalg.solve(A, b)
+print(f"解: {x}")  # [1. 2.]  验证: 1*1+2*2=5, 3*1+4*2=11
+```
+
+### 全连接层的前向传播（用 NumPy 模拟）
+
+```python
+# 模拟一个简单的全连接层
+batch_size = 4
+input_dim = 3
+output_dim = 2
+
+# 输入数据（假装是前一层的输出）
+X = np.random.randn(batch_size, input_dim)
+
+# 权重矩阵和偏置向量
+W = np.random.randn(input_dim, output_dim) * 0.01
+b = np.zeros(output_dim)
+
+# 前向传播: Y = X @ W + b
+Y = X @ W + b
+print(f"输出形状: {Y.shape}")  # (4, 2)
+print(f"输出: \n{Y}")
+```
+
+## 8. 随机数生成（ML 初始化专用）
+
+深度学习模型的权重初始化、数据集的随机打乱、Dropout 层的随机遮蔽——随机数贯穿整个 ML 训练流程。
+
+```python
+# 1. 设置种子 — 实验复现的第一道防线！
+np.random.seed(42)
+
+# 2. 均匀分布 — 不太常用的初始化方式
+uniform = np.random.uniform(low=-0.1, high=0.1, size=(5, 5))
+
+# 3. 正态分布 — Xavier 初始化的基础
+# Xavier: W ~ N(0, sqrt(2/(n_in + n_out)))
+n_in, n_out = 100, 50
+std = np.sqrt(2.0 / (n_in + n_out))
+W_xavier = np.random.normal(0, std, size=(n_in, n_out))
+print(f"Xavier 初始化 W: mean={W_xavier.mean():.6f}, std={W_xavier.std():.4f}")
+
+# 4. He 初始化 (ReLU 激活用) — Kaiming 初始化
+# He: W ~ N(0, sqrt(2/n_in))
+std_he = np.sqrt(2.0 / n_in)
+W_he = np.random.normal(0, std_he, size=(n_in, n_out))
+print(f"He 初始化 W: mean={W_he.mean():.6f}, std={W_he.std():.4f}")
+
+# 5. 随机打乱 — 训练前必须打乱数据集！
+indices = np.arange(100)
+np.random.shuffle(indices)
+print(f"前 10 个打乱的索引: {indices[:10]}")
+
+# 6. 随机抽样 — 构建 mini-batch
+batch_indices = np.random.choice(100, size=16, replace=False)
+print(f"Batch 索引: {batch_indices}")
+
+# 7. 从给定概率分布中抽样（模拟分类模型的采样）
+classes = [0, 1, 2, 3]
+probs = [0.1, 0.4, 0.3, 0.2]  # 模型输出的概率分布
+samples = np.random.choice(classes, size=10, p=probs)
+print(f"从分布中抽样: {samples}")
+```
+
+## 9. 实战练习：加载数据并分析
+
+下面的练习综合运用了本节学到的所有技能：从 CSV 加载数据、标准化、计算统计量。
+
+```python
+import numpy as np
+
+# 模拟从 CSV 加载数据（实际使用 np.loadtxt 或 pandas 读取）
+# 生成一个模拟的房价数据集
+np.random.seed(42)
+n_samples = 100
+
+# 特征：面积(平方米)、卧室数、房龄(年)、距市中心距离(km)
+area = np.random.normal(120, 30, n_samples)
+bedrooms = np.random.randint(1, 6, n_samples)
+age = np.random.uniform(0, 50, n_samples)
+distance = np.random.exponential(5, n_samples)
+
+# 将特征堆叠成一个矩阵
+X = np.column_stack([area, bedrooms, age, distance])
+print(f"数据矩阵形状: {X.shape}")  # (100, 4)
+print(f"特征名称: ['面积', '卧室数', '房龄', '距市中心距离']")
+
+# --- 数据探索 ---
+print("\n=== 基本统计量 ===")
+for i, name in enumerate(['面积', '卧室数', '房龄', '距离']):
+    col = X[:, i]
+    print(f"{name}: mean={col.mean():.2f}, std={col.std():.2f}, "
+          f"min={col.min():.2f}, max={col.max():.2f}")
+
+# --- 检测缺失值 ---
+if np.any(np.isnan(X)):
+    print("\n⚠️  数据中存在缺失值，需要处理!")
+else:
+    print("\n✓ 数据中没有缺失值")
+
+# --- 标准化（Z-score normalization）---
+X_mean = X.mean(axis=0)
+X_std = X.std(axis=0)
+X_norm = (X - X_mean) / X_std
+
+print("\n=== 标准化后 ===")
+print(f"各列均值 (应接近 0): {X_norm.mean(axis=0).round(6)}")
+print(f"各列标准差 (应等于 1): {X_norm.std(axis=0).round(6)}")
+
+# --- 相关性分析 ---
+correlation_matrix = np.corrcoef(X.T)
+print(f"\n=== 相关性矩阵 ===\n{np.round(correlation_matrix, 3)}")
+
+# 找出与面积最相关的特征
+area_correlations = correlation_matrix[0, :]
+most_correlated_idx = np.argmax(np.abs(area_correlations[1:])) + 1
+print(f"\n与面积最相关的特征索引: {most_correlated_idx}")
+
+# --- 数据拆分（80% 训练，20% 测试）---
+split_idx = int(0.8 * n_samples)
+indices = np.arange(n_samples)
+np.random.shuffle(indices)
+
+train_idx = indices[:split_idx]
+test_idx = indices[split_idx:]
+
+X_train, X_test = X[train_idx], X[test_idx]
+print(f"\n训练集大小: {len(X_train)}")
+print(f"测试集大小: {len(X_test)}")
+
+print("\n✓ 数据预处理完成！这些技术将在每个 ML 项目中反复使用。")
+```
+
+## 总结
+
+NumPy 是进入 ML 世界的门户。本节覆盖的核心内容包括：
+
+1. **数组创建** — 从列表创建、预定义函数（zeros/ones/eye）、序列生成（arange/linspace）、随机数组。这些是每天写 ML 代码时的起手式。
+2. **索引与切片** — 基础索引、布尔索引（数据过滤）、花式索引（灵活选取）。数据清洗和特征工程的核心工具。
+3. **广播机制** — 不同形状数组的自动对齐运算。理解广播规则可以避免大量不必要的 reshape，写出简洁高效的代码。
+4. **通用函数** — 向量化的逐元素运算，是实现激活函数（ReLU、Sigmoid、Tanh）和损失函数的底层基础。
+5. **线性代数** — 矩阵乘法和 linalg 模块。全连接层的前向传播本质上就是 `X @ W + b`。
+6. **随机数** — 权重初始化（Xavier/He）、数据打乱、mini-batch 抽样。设置好 `np.random.seed` 是确保实验可复现的第一步。
+
+NumPy 是 PyTorch、TensorFlow、JAX 等所有主流框架的"灵感来源"。掌握了 NumPy，你将发现这些框架的 API 有着惊人的相似性。
+
+---
+
+下一节：[线性代数深入](/lesson/linear-algebra) — 理解 ML 背后的数学之美。

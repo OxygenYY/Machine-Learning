@@ -1,0 +1,248 @@
+---
+title: "主成分分析（PCA）"
+description: "深入理解主成分分析的数学原理，实现降维与可视化，掌握协方差矩阵、特征值与方差解释率"
+part: "04-unsupervised-learning"
+order: 3
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "理解维度灾难与降维的必要性：可视化、去噪、特征工程"
+  - "掌握 PCA 的数学推导：协方差矩阵、特征值分解、主成分方向"
+  - "学会用方差解释率和碎石图选择合适的主成分数量"
+  - "用 PyTorch 的 SVD 从零实现 PCA"
+  - "在 MNIST 数据集上应用 PCA 进行可视化与预处理"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra"]
+keywords: ["PCA", "主成分分析", "降维", "特征值", "奇异值分解", "方差解释率", "碎石图"]
+---
+
+# 主成分分析（PCA）
+
+当数据维度很高时，我们面临"维度灾难"：距离变得没有区分度，模型容易过拟合，计算成本骤增，并且无法直接可视化。主成分分析（Principal Component Analysis, PCA）是最经典的线性降维方法，它寻找数据方差最大的方向，将数据投影到低维空间。
+
+## 降维的动机
+
+- **可视化**：将高维数据降到 2D 或 3D，直观观察数据分布
+- **去噪**：低方差的分量通常对应噪声，去除它们有助于提升模型性能
+- **特征压缩**：减少特征数量，降低存储与计算开销
+- **去相关**：PCA 将特征变换为互不相关的主成分，利于下游模型
+
+## PCA 的数学原理
+
+给定数据中心化后的矩阵 $X \in \mathbb{R}^{n \times d}$（$n$ 个样本，$d$ 个特征，每列均值为 0），我们希望找到一个投影方向 $w$（$\|w\| = 1$），使得投影后的方差最大：
+
+$$\text{Var}(Xw) = \frac{1}{n-1} w^\top X^\top X w = w^\top C w$$
+
+其中 $C = \frac{1}{n-1} X^\top X$ 是协方差矩阵。这等价于求解：
+
+$$w_1 = \arg\max_{\|w\|=1} w^\top C w$$
+
+由拉格朗日乘子法可证，最优 $w_1$ 就是协方差矩阵 $C$ 的最大特征值对应的特征向量（第一主成分）。第二主成分 $w_2$ 在与 $w_1$ 正交的约束下最大化方差，即第二大的特征值对应的特征向量，以此类推。
+
+因此 PCA 的核心步骤即为：
+1. 中心化数据（减去均值）
+2. 计算协方差矩阵 $C = \frac{1}{n-1} X^\top X$
+3. 对 $C$ 做特征值分解，得到特征值 $\lambda_1 \ge \lambda_2 \ge \cdots \ge \lambda_d$ 和特征向量 $v_1, v_2, \ldots, v_d$
+4. 选取前 $k$ 个特征向量作为主成分矩阵 $W_k = [v_1,\ldots,v_k] \in \mathbb{R}^{d \times k}$
+5. 投影：$Z = X W_k$（形状 $n \times k$）
+
+## 方差解释率
+
+第 $j$ 个主成分的方差解释率为：
+
+$$\text{Explained Variance Ratio}_j = \frac{\lambda_j}{\sum_{i=1}^{d} \lambda_i}$$
+
+它衡量了该主成分"保留"了原始数据多少比例的信息。累加前 $k$ 个主成分的方差解释率，得到累计方差解释率：
+
+$$\text{Cumulative EVR}(k) = \frac{\sum_{i=1}^{k} \lambda_i}{\sum_{i=1}^{d} \lambda_i}$$
+
+## 用 PyTorch 实现 PCA（基于 SVD）
+
+奇异值分解（SVD）是数值上更稳定的 PCA 实现方式。对中心化后的数据 $X$ 进行 SVD：
+
+$$X = U \Sigma V^\top$$
+
+其中 $V$ 的列就是主成分方向，$\frac{\sigma_i^2}{n-1}$ 就是对应的特征值。
+
+```python
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_digits
+from torch.utils.data import DataLoader, TensorDataset
+
+class PCA:
+    """主成分分析，基于 PyTorch SVD 实现"""
+    def __init__(self, n_components=None):
+        self.n_components = n_components
+        self.mean_ = None
+        self.components_ = None  # shape (n_components, n_features)
+        self.explained_variance_ = None
+        self.explained_variance_ratio_ = None
+
+    def fit(self, X):
+        """
+        Args:
+            X: torch.Tensor, shape (n_samples, n_features)
+        """
+        # 1. 中心化
+        self.mean_ = X.mean(dim=0, keepdim=True)
+        X_centered = X - self.mean_
+
+        # 2. SVD 分解
+        # U: (n, n), S: (min(n,d),), Vt: (d, d)
+        U, S, Vt = torch.linalg.svd(X_centered, full_matrices=False)
+
+        # 3. 特征值 = sigma^2 / (n-1)
+        n = X.shape[0]
+        self.explained_variance_ = (S ** 2) / (n - 1)
+        self.explained_variance_ratio_ = (
+            self.explained_variance_ / self.explained_variance_.sum()
+        )
+
+        # 4. 主成分 = Vt 的前 k 行（即 V 的前 k 列）
+        k = self.n_components if self.n_components else X.shape[1]
+        self.components_ = Vt[:k, :]
+
+        return self
+
+    def transform(self, X):
+        """投影到主成分空间"""
+        X_centered = X - self.mean_
+        return X_centered @ self.components_.T
+
+    def fit_transform(self, X):
+        self.fit(X)
+        return self.transform(X)
+
+    def inverse_transform(self, Z):
+        """从低维空间重建原始数据"""
+        return Z @ self.components_ + self.mean_
+
+# 在随机数据上测试
+torch.manual_seed(42)
+X_demo = torch.randn(200, 10)
+pca = PCA(n_components=2)
+Z = pca.fit_transform(X_demo)
+
+print(f"特征值: {pca.explained_variance_[:5].numpy()}")
+print(f"方差解释率: {pca.explained_variance_ratio_[:5].numpy()}")
+print(f"累计方差解释率: {pca.explained_variance_ratio_.cumsum(dim=0)[:5].numpy()}")
+```
+
+## 碎石图（Scree Plot）
+
+碎石图是选择主成分数量的核心工具。它显示每个主成分的特征值（或方差解释率），通常寻找"拐点"——特征值骤降后趋于平缓的位置。
+
+```python
+def plot_scree_and_cumulative(pca_model):
+    """绘制碎石图与累计方差解释率"""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    evr = pca_model.explained_variance_ratio_.numpy()
+    cumulative = evr.cumsum()
+
+    # 碎石图
+    axes[0].bar(range(1, len(evr) + 1), evr, color='steelblue', alpha=0.8)
+    axes[0].plot(range(1, len(evr) + 1), evr, 'ro-', markersize=4)
+    axes[0].set_xlabel('主成分编号')
+    axes[0].set_ylabel('方差解释率')
+    axes[0].set_title('碎石图（Scree Plot）')
+    axes[0].grid(True, alpha=0.3)
+
+    # 累计方差解释率
+    axes[1].plot(range(1, len(cumulative) + 1), cumulative,
+                 'b-o', markersize=4, linewidth=2)
+    axes[1].axhline(y=0.95, color='r', linestyle='--', label='95% 阈值')
+    axes[1].axhline(y=0.90, color='orange', linestyle='--', label='90% 阈值')
+    axes[1].set_xlabel('主成分数量')
+    axes[1].set_ylabel('累计方差解释率')
+    axes[1].set_title('累计方差解释率')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    # 找到达到 95% 解释率的最小 k
+    k_95 = (cumulative >= 0.95).nonzero()[0][0].item() + 1
+    print(f"保留 {k_95} 个主成分可解释 95% 的方差")
+
+    plt.tight_layout()
+    plt.show()
+```
+
+## PCA 实战：MNIST 数字可视化
+
+MNIST 数据集有 784 维（28x28 像素），我们无法直接可视化。PCA 将其降到 2D，让我们能看到数字的分布。
+
+```python
+from sklearn.datasets import fetch_openml
+
+def pca_mnist_visualization():
+    """用 PCA 将 MNIST 降到 2D 并可视化"""
+    # 加载 MNIST（采样 5000 张以加速）
+    mnist = fetch_openml('mnist_784', version=1, as_frame=False,
+                         parser='auto')
+    X_full, y_full = mnist.data[:5000], mnist.target[:5000]
+    X_tensor = torch.tensor(X_full, dtype=torch.float32)
+
+    # PCA 降维到 2D
+    pca = PCA(n_components=2)
+    Z = pca.fit_transform(X_tensor)
+    Z_np = Z.numpy()
+
+    print(f"前 2 个主成分解释了 {pca.explained_variance_ratio_[:2].sum().item() * 100:.1f}% 的方差")
+
+    # 可视化
+    fig, ax = plt.subplots(figsize=(10, 8))
+    colors = plt.cm.tab10(np.linspace(0, 1, 10))
+    for digit in range(10):
+        mask = y_full.astype(int) == digit
+        ax.scatter(Z_np[mask, 0], Z_np[mask, 1], c=[colors[digit]],
+                   label=str(digit), s=15, alpha=0.6)
+    ax.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0].item() * 100:.1f}%)')
+    ax.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1].item() * 100:.1f}%)')
+    ax.set_title('MNIST 数字的 PCA 二维投影')
+    ax.legend(markerscale=2)
+    plt.show()
+
+    return Z_np, y_full
+```
+
+## PCA 用于预处理（Whitening）
+
+PCA 白化将数据变换为各维方差为 1、互不相关的形式，常用于某些模型的输入预处理：
+
+```python
+def pca_whiten(X, n_components=None, eps=1e-6):
+    """PCA 白化"""
+    mean = X.mean(dim=0, keepdim=True)
+    X_centered = X - mean
+
+    U, S, Vt = torch.linalg.svd(X_centered, full_matrices=False)
+
+    if n_components is not None:
+        S = S[:n_components]
+        Vt = Vt[:n_components, :]
+
+    # 白化：除以奇异值，使得各维方差为 1
+    Z = X_centered @ Vt.T / (S.unsqueeze(0) + eps)
+
+    return Z
+```
+
+## PCA 的局限性
+
+1. **仅捕获线性关系**：PCA 寻找的是线性投影方向，对非线性流形效果不佳（此时需要 t-SNE/UMAP）
+2. **对方差大的特征敏感**：需要先标准化到均值为 0、标准差为 1，否则量纲大的特征会主导主成分
+3. **主成分不易解释**：每个主成分是所有原始特征的线性组合，可解释性差
+4. **假设最大方差方向最重要**：在某些任务中（如分类），方差大的方向未必判别性强
+
+## 实际应用场景
+
+- **数据探索与可视化**：在项目初期快速了解数据分布
+- **特征降维**：作为深度学习之前的预处理步骤
+- **基因表达分析**：在生物信息学中用于发现群体结构
+- **金融风险建模**：从多因子中提取独立的系统性风险因子
+- **图像压缩**：用较少的主成分近似重建图像
+
+## 总结
+
+PCA 是无监督学习中最重要的降维工具之一。它简单、高效，有着优美的数学解释，是探索高维数据的第一步。记住实践中的关键点：**务必先标准化数据**，使用方差解释率来选择主成分数量，以及认识到 PCA 只能捕捉线性结构。下一课我们将学习 t-SNE 和 UMAP，它们能处理复杂的非线性流形结构。

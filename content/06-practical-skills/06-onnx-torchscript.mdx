@@ -1,0 +1,398 @@
+---
+title: "ONNX 与 TorchScript 模型导出"
+description: "掌握 TorchScript JIT 编译和 ONNX 跨框架模型导出，在 ONNX Runtime 上获得更快的推理性能"
+part: "06-practical-skills"
+order: 6
+difficulty: "advanced"
+estimatedMinutes: 35
+objectives:
+  - "理解模型序列化格式在生产环境中的重要性"
+  - "掌握 TorchScript 的两种模式：torch.jit.script 和 torch.jit.trace"
+  - "学会将 PyTorch 模型导出为 ONNX 格式"
+  - "使用 ONNX Runtime 进行跨平台推理"
+  - "对比 PyTorch、TorchScript 和 ONNX Runtime 的推理性能"
+  - "选择合适的部署方案"
+prerequisites: ["python-basics", "training-dnn", "cnn-pytorch", "deployment-api"]
+keywords: ["onnx", "torchscript", "jit", "model-export", "inference", "onnx-runtime"]
+---
+
+# 一、为什么需要模型序列化格式？
+
+在上一课中，我们直接保存了 PyTorch 模型并用 FastAPI 加载。但在生产环境中，这存在几个问题：
+
+1. **环境依赖**：必须安装 PyTorch（体积大，~2GB）
+2. **Python 依赖**：只能在 Python 环境中运行
+3. **性能开销**：PyTorch 的 eager 执行模式有额外开销
+4. **跨框架**：如果团队用 TensorFlow 训练，但部署用 PyTorch 会很麻烦
+
+**TorchScript** 和 **ONNX** 解决了这些问题。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import time
+```
+
+# 二、TorchScript
+
+TorchScript 是 PyTorch 的 JIT（Just-In-Time）编译器，它将 PyTorch 模型编译成一个可以独立于 Python 运行的中间表示（IR）。
+
+## 2.1 torch.jit.script（推荐）
+
+`script` 通过分析 Python 源代码来编译模型。它能处理控制流（if/for 等），但不支持所有 Python 语法。
+
+```python
+class ScriptableCNN(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.fc1 = nn.Linear(32 * 8 * 8, 128)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = torch.flatten(x, 1)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+
+# 创建模型实例
+model_cnn = ScriptableCNN(num_classes=10)
+model_cnn.eval()
+
+# 使用 torch.jit.script 编译
+scripted_model = torch.jit.script(model_cnn)
+print(f"Script 模型类型: {type(scripted_model)}")
+
+# 可以查看编译后的图
+print("\n编译后的计算图:")
+print(scripted_model.graph)
+
+# 也可以直接打印模型结构
+print("\nScript 模型结构:")
+print(scripted_model)
+
+# 保存和加载
+torch.jit.save(scripted_model, 'model_scripted.pt')
+loaded_scripted = torch.jit.load('model_scripted.pt')
+print("\nScript 模型已保存并重新加载")
+```
+
+## 2.2 torch.jit.trace（另一种方式）
+
+`trace` 通过记录一个具体输入在模型中的执行路径来编译。它不能处理动态控制流（如根据输入改变分支的 if 语句）。
+
+```python
+# 创建示例输入
+example_input = torch.randn(1, 3, 32, 32)
+
+# 使用 trace 编译
+traced_model = torch.jit.trace(model_cnn, example_input)
+print(f"Trace 模型类型: {type(traced_model)}")
+
+# 验证两种方式的结果一致
+with torch.no_grad():
+    output_orig = model_cnn(example_input)
+    output_script = scripted_model(example_input)
+    output_trace = traced_model(example_input)
+
+print(f"原始输出与 Script 的差异: {(output_orig - output_script).abs().max():.2e}")
+print(f"原始输出与 Trace 的差异: {(output_orig - output_trace).abs().max():.2e}")
+```
+
+## 2.3 Script vs Trace：如何选择？
+
+```python
+# 演示 script 和 trace 的关键区别
+
+class ControlFlowModel(nn.Module):
+    """包含动态控制流的模型"""
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(10, 10)
+
+    def forward(self, x):
+        # 根据输入张量的大小动态选择分支
+        if x.sum() > 0:
+            return self.linear(x) * 2
+        else:
+            return self.linear(x) * 0.5
+
+
+cf_model = ControlFlowModel()
+
+# Script 可以正确处理控制流
+scripted_cf = torch.jit.script(cf_model)
+
+# Trace 会将控制流"固化"为示例输入走过的路径
+# 如果示例输入 x.sum() > 0，则 trace 的后继调用就永远是 *2 分支
+traced_cf = torch.jit.trace(cf_model, torch.randn(1, 10))
+
+# 验证
+x_positive = torch.ones(1, 10)    # sum > 0
+x_negative = -torch.ones(1, 10)   # sum < 0
+
+print("=== Script (正确处理控制流) ===")
+print(f"正输入:  {scripted_cf(x_positive)[0, :3].tolist()}")
+print(f"负输入:  {scripted_cf(x_negative)[0, :3].tolist()}")
+
+print("\n=== Trace (控制流被固化) ===")
+print(f"正输入:  {traced_cf(x_positive)[0, :3].tolist()}")
+print(f"负输入:  {traced_cf(x_negative)[0, :3].tolist()}")
+print("注意: Trace 对负输入的输出也可能是 *2 (取决于示例输入)")
+```
+
+**选择指南**：
+| 场景 | 推荐方式 |
+|------|----------|
+| 标准 CNN/MLP（无动态控制流） | 任一方式均可，trace 更简单 |
+| 包含 if/for/while 控制流 | **必须用 script** |
+| 包含 Python 数据结构操作 | **必须用 script** |
+| 模型非常复杂，script 不工作 | 尝试 trace |
+| 需要精确控制导出行为 | script |
+
+# 三、ONNX (Open Neural Network Exchange)
+
+ONNX 是一个跨框架的模型交换格式。它将模型转换为一个标准化的计算图，可以在各种推理引擎上运行。
+
+## 3.1 将 PyTorch 模型导出为 ONNX
+
+```python
+# 准备导出
+dummy_input = torch.randn(1, 3, 32, 32)  # batch_size=1 的示例输入
+onnx_path = "model.onnx"
+
+torch.onnx.export(
+    model_cnn,                          # 要导出的模型
+    dummy_input,                        # 示例输入
+    onnx_path,                          # 输出文件路径
+    export_params=True,                 # 将训练好的参数存入模型文件
+    opset_version=14,                   # ONNX 算子集版本（14 是稳定版本）
+    do_constant_folding=True,           # 执行常量折叠优化
+    input_names=['input'],              # 输入节点名称
+    output_names=['output'],            # 输出节点名称
+    dynamic_axes={                      # 动态轴：支持可变 batch size
+        'input': {0: 'batch_size'},
+        'output': {0: 'batch_size'}
+    }
+)
+
+print(f"模型已导出为 ONNX: {onnx_path}")
+```
+
+## 3.2 验证 ONNX 模型
+
+```python
+import onnx
+
+# 加载并检查 ONNX 模型
+onnx_model = onnx.load(onnx_path)
+onnx.checker.check_model(onnx_model)
+print("ONNX 模型验证通过!")
+
+# 查看计算图的结构
+print("\nONNX 图信息:")
+print(f"  生产者: {onnx_model.producer_name}")
+print(f"  版本: {onnx_model.opset_import[0].version}")
+print(f"  输入: {[inp.name for inp in onnx_model.graph.input]}")
+print(f"  输出: {[out.name for out in onnx_model.graph.output]}")
+
+# 统计算子类型
+from collections import Counter
+op_types = Counter([node.op_type for node in onnx_model.graph.node])
+print(f"\n算子统计:")
+for op, count in op_types.most_common():
+    print(f"  {op}: {count}")
+```
+
+## 3.3 使用 ONNX Runtime 推理
+
+```python
+import onnxruntime as ort
+
+# 创建 ONNX Runtime 推理会话
+# providers: CPU, CUDA, TensorRT 等
+providers = ['CPUExecutionProvider']
+if 'CUDAExecutionProvider' in ort.get_available_providers():
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+
+session = ort.InferenceSession(onnx_path, providers=providers)
+print(f"使用执行提供器: {session.get_providers()}")
+
+# 推理
+input_data = np.random.randn(4, 3, 32, 32).astype(np.float32)
+input_name = session.get_inputs()[0].name
+output_name = session.get_outputs()[0].name
+
+onnx_outputs = session.run([output_name], {input_name: input_data})
+onnx_result = onnx_outputs[0]
+print(f"ONNX Runtime 输出形状: {onnx_result.shape}")
+```
+
+# 四、性能对比
+
+```python
+# 性能基准测试
+def benchmark_inference(model_fn, input_tensor, device='cpu', warmup=20, repeat=100):
+    """测量推理延迟"""
+    if isinstance(input_tensor, np.ndarray):
+        input_tensor = torch.from_numpy(input_tensor)
+
+    input_tensor = input_tensor.to(device)
+    if hasattr(model_fn, 'to'):
+        model_fn = model_fn.to(device)
+
+    # Warmup
+    for _ in range(warmup):
+        _ = model_fn(input_tensor)
+    if device == 'cuda':
+        torch.cuda.synchronize()
+
+    # 计时
+    start = time.perf_counter()
+    for _ in range(repeat):
+        _ = model_fn(input_tensor)
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    elapsed = time.perf_counter() - start
+
+    avg_ms = (elapsed / repeat) * 1000
+    return avg_ms
+
+
+# 准备测试数据
+test_input = torch.randn(1, 3, 32, 32)
+
+print("=== 推理性能对比 (CPU) ===\n")
+
+# 1. 原生 PyTorch eager
+model_cnn.eval()
+with torch.no_grad():
+    pytorch_time = benchmark_inference(model_cnn, test_input)
+print(f"PyTorch (eager):      {pytorch_time:.3f} ms")
+
+# 2. TorchScript
+scripted_model.eval()
+with torch.no_grad():
+    ts_time = benchmark_inference(scripted_model, test_input)
+print(f"TorchScript:           {ts_time:.3f} ms")
+
+# 3. ONNX Runtime
+def onnx_infer(x):
+    return torch.from_numpy(session.run([output_name],
+                          {input_name: x.numpy()})[0])
+onnx_time = benchmark_inference(onnx_infer, test_input)
+print(f"ONNX Runtime:          {onnx_time:.3f} ms")
+
+print(f"\nTorchScript 加速: {(pytorch_time/ts_time - 1)*100:.1f}%")
+print(f"ONNX Runtime 加速: {(pytorch_time/onnx_time - 1)*100:.1f}%")
+```
+
+# 五、部署方案选择
+
+```python
+# 决策辅助工具
+def recommend_deployment(requirements):
+    """
+    requirements: dict with keys like 'latency_ms', 'framework', 'language'
+    """
+    if requirements.get('language') in ['C++', 'Java', 'C#']:
+        return "ONNX Runtime (原生支持多种语言)"
+
+    if requirements.get('latency_ms') and requirements['latency_ms'] < 1:
+        return "TensorRT (GPU) 或 ONNX Runtime + 量化"
+
+    if requirements.get('framework_independent'):
+        return "ONNX (跨框架标准格式)"
+
+    if requirements.get('dynamic_control_flow'):
+        return "TorchScript (jit.script)"
+
+    # 默认
+    return "TorchScript (轻量、与 PyTorch 生态系统完美集成)"
+
+
+print("\n=== 部署方案推荐 ===")
+print(f"C++ 服务端部署:    {recommend_deployment({'language': 'C++'})}")
+print(f"超低延迟要求:      {recommend_deployment({'latency_ms': 0.5})}")
+print(f"跨团队协作:        {recommend_deployment({'framework_independent': True})}")
+print(f"动态网络结构:      {recommend_deployment({'dynamic_control_flow': True})}")
+```
+
+# 六、完整工作流示例
+
+```python
+def export_pipeline(model, example_input, output_dir="./exported"):
+    """完整的模型导出流程"""
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    model.eval()
+
+    # Step 1: TorchScript
+    try:
+        scripted = torch.jit.script(model)
+        ts_path = os.path.join(output_dir, "model_scripted.pt")
+        torch.jit.save(scripted, ts_path)
+        print(f"[OK] TorchScript 保存至 {ts_path}")
+    except Exception as e:
+        print(f"[跳过] TorchScript 失败: {e}")
+        scripted = None
+
+    # Step 2: ONNX
+    try:
+        onnx_path = os.path.join(output_dir, "model.onnx")
+        torch.onnx.export(
+            model, example_input, onnx_path,
+            export_params=True,
+            opset_version=14,
+            do_constant_folding=True,
+            input_names=['input'],
+            output_names=['output'],
+            dynamic_axes={'input': {0: 'batch'}, 'output': {0: 'batch'}}
+        )
+        print(f"[OK] ONNX 保存至 {onnx_path}")
+    except Exception as e:
+        print(f"[跳过] ONNX 导出失败: {e}")
+
+    # Step 3: ONNX Runtime 验证
+    try:
+        session = ort.InferenceSession(onnx_path)
+        input_name = session.get_inputs()[0].name
+        np_input = example_input.numpy()
+        onnx_out = session.run(None, {input_name: np_input})
+        with torch.no_grad():
+            torch_out = model(example_input).numpy()
+        diff = np.abs(onnx_out[0] - torch_out).max()
+        print(f"[OK] ONNX vs PyTorch 最大差异: {diff:.2e}")
+    except Exception as e:
+        print(f"[警告] ONNX Runtime 验证失败: {e}")
+
+    print("\n导出完成!")
+
+# 执行完整导出流程
+export_pipeline(model_cnn, example_input)
+```
+
+# 七、常见问题与注意事项
+
+1. **动态轴**：如果不设置 `dynamic_axes`，ONNX 模型只能接受固定 batch size 的输入。
+2. **不支持的算子**：某些自定义 PyTorch 算子可能无法导出为 ONNX。使用 `torch.onnx.export` 的 `verbose=True` 查看详细信息。
+3. **Trace 的陷阱**：如果模型中有 `if x > 0: ... else: ...` 这样的控制流，`trace` 只会记录一条路径，务必使用 `script`。
+4. **设备一致性**：导出时模型应在 CPU 上（`model.cpu()`）。ONNX Runtime 会在推理时再选择执行设备。
+5. **精度**：默认情况下 ONNX 导出使用 FP32。可以在此基础上添加量化（INT8）进一步加速。
+
+# 八、关键要点
+
+1. TorchScript 编译后的模型**不依赖 Python**，可在 C++ 环境中独立运行。
+2. `torch.jit.script` 处理控制流，`torch.jit.trace` 记录执行路径——有控制流必用 script。
+3. ONNX 是**跨框架**的标准格式，训练用 PyTorch 但部署用其他推理引擎时首选。
+4. ONNX Runtime 通常比原生 PyTorch 推理**快 10-30%**，是 CPU 部署的首选。
+5. 导出 ONNX 时务必设置 **dynamic_axes** 以支持可变 batch size。
+6. GPU 部署的极致性能用 **TensorRT**（通过 ONNX 转换），或直接用 PyTorch + CUDA。

@@ -1,0 +1,363 @@
+---
+title: "生成对抗网络（GANs）"
+description: "深入理解生成对抗网络的对抗训练机制，用 PyTorch 实现 DCGAN 生成手写数字，掌握稳定训练的核心技巧"
+part: "04-unsupervised-learning"
+order: 6
+difficulty: "advanced"
+estimatedMinutes: 45
+objectives:
+  - "理解 GAN 的对抗博弈框架：生成器与判别器的动态竞争"
+  - "掌握 GAN 训练算法中的交替优化策略"
+  - "实现 DCGAN 架构并训练生成手写数字"
+  - "诊断并缓解训练不稳定性：模式崩塌、振荡、梯度消失"
+  - "了解 GAN 家族的发展：StyleGAN、CycleGAN、条件 GAN"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra", "pytorch-basics"]
+keywords: ["GAN", "生成对抗网络", "DCGAN", "生成器", "判别器", "模式崩塌", "对抗训练", "图像生成"]
+---
+
+# 生成对抗网络（GANs）
+
+生成对抗网络（Generative Adversarial Networks）是 Ian Goodfellow 于 2014 年提出的里程碑式生成模型。与 VAE 的显式概率建模不同，GAN 通过一个巧妙的博弈论框架隐式地学习数据分布，能够生成极其逼真的图像。
+
+## 核心思想：两方对抗博弈
+
+GAN 由两个神经网络组成：
+
+- **生成器（Generator）$G$**：接收随机噪声 $z \sim p_z$（通常为标准正态），输出伪造样本 $G(z)$，目标是"欺骗"判别器
+- **判别器（Discriminator）$D$**：接收样本 $x$（真实或伪造），输出 $D(x) \in [0, 1]$，即 $x$ 是真实样本的概率，目标是准确区分真伪
+
+两者进行极小极大博弈（minimax game）：
+
+$$\min_G \max_D \; \mathbb{E}_{x \sim p_{\text{data}}}[\log D(x)] + \mathbb{E}_{z \sim p_z}[\log(1 - D(G(z)))]$$
+
+判别器 $D$ 希望最大化该目标（正确分类真假），生成器 $G$ 希望最小化它（让 $D(G(z))$ 接近 1）。
+
+## GAN 训练算法
+
+在每个训练迭代中，交替优化 $D$ 和 $G$：
+
+1. **训练判别器**（$k$ 步，通常 $k=1$）：
+   - 从真实数据采样一个小批次的 $x$
+   - 从噪声先验采样 $z$，生成伪造样本 $G(z)$
+   - 计算 $D$ 的损失，更新 $D$ 的参数
+
+2. **固定判别器，训练生成器**（1 步）：
+   - 从噪声先验采样 $z$
+   - 生成伪造样本 $G(z)$，让 $D$ 评判
+   - 计算 $G$ 的损失，更新 $G$ 的参数
+
+### 损失函数变体
+
+原始的 minimax 损失中，当判别器很强时，生成器梯度趋于零（$\log(1-D(G(z)))$ 饱和）。**非饱和损失**（Non-saturating Loss）通过改变生成器的目标来解决此问题：
+
+**判别器损失**（不变）：
+$$\mathcal{L}_D = -\mathbb{E}_{x \sim p_{\text{data}}}[\log D(x)] - \mathbb{E}_{z \sim p_z}[\log(1 - D(G(z)))]$$
+
+**生成器损失**（修改后）：
+$$\mathcal{L}_G = -\mathbb{E}_{z \sim p_z}[\log D(G(z))]$$
+
+等价于生成器最大化判别器误判的概率，梯度信号更强。
+
+## DCGAN 架构
+
+DCGAN（Deep Convolutional GAN，Radford et al., 2015）将卷积架构引入 GAN，主要设计原则：
+- 用步幅卷积（stride-2 conv）替代池化进行下采样/上采样
+- 判别器使用 LeakyReLU，生成器使用 ReLU（输出层用 Tanh）
+- 生成器和判别器都使用批归一化（BatchNorm）
+- 避免全连接层（除最后的映射层外）
+
+## PyTorch 实现
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+from torchvision.utils import make_grid
+import matplotlib.pyplot as plt
+import numpy as np
+
+# 超参数
+LATENT_DIM = 100
+IMAGE_SIZE = 28   # MNIST
+IMAGE_CHANNELS = 1
+BATCH_SIZE = 128
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+class Generator(nn.Module):
+    """DCGAN 生成器：噪声 -> 上采样 -> 图像"""
+    def __init__(self, latent_dim=100):
+        super().__init__()
+        self.model = nn.Sequential(
+            # 输入: (latent_dim,) -> (256, 7, 7)
+            nn.ConvTranspose2d(latent_dim, 256, kernel_size=7, stride=1,
+                               padding=0, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(True),
+
+            # (256, 7, 7) -> (128, 14, 14)
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2,
+                               padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(True),
+
+            # (128, 14, 14) -> (1, 28, 28)
+            nn.ConvTranspose2d(128, 1, kernel_size=4, stride=2,
+                               padding=1, bias=False),
+            nn.Tanh(),  # 输出范围 [-1, 1]
+        )
+
+    def forward(self, z):
+        z = z.view(z.size(0), z.size(1), 1, 1)  # (B, D, 1, 1)
+        return self.model(z)
+
+class Discriminator(nn.Module):
+    """DCGAN 判别器：图像 -> 真实性分数"""
+    def __init__(self):
+        super().__init__()
+        self.model = nn.Sequential(
+            # 输入: (1, 28, 28) -> (64, 14, 14)
+            nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # (64, 14, 14) -> (128, 7, 7)
+            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # (128, 7, 7) -> (256, 3, 3)
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+
+            # (256, 3, 3) -> (1, 1, 1)
+            nn.Conv2d(256, 1, kernel_size=3, stride=1, padding=0, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        out = self.model(x)
+        return out.view(-1, 1)  # (B, 1)
+```
+
+### 权重初始化
+
+DCGAN 建议用 $\mathcal{N}(0, 0.02)$ 初始化权重：
+
+```python
+def init_weights(model):
+    """DCGAN 推荐的正态分布初始化"""
+    for m in model.modules():
+        if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d, nn.BatchNorm2d)):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+# 实例化模型
+generator = Generator(latent_dim=LATENT_DIM).to(DEVICE)
+discriminator = Discriminator().to(DEVICE)
+init_weights(generator)
+init_weights(discriminator)
+```
+
+### 数据加载
+
+```python
+# MNIST 数据加载（归一化到 [-1, 1] 匹配 Tanh 输出）
+transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5], std=[0.5]),  # [0,1] -> [-1,1]
+])
+
+train_dataset = datasets.MNIST(
+    root='./data', train=True, transform=transform, download=True
+)
+train_loader = DataLoader(
+    train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=True
+)
+```
+
+### 训练循环
+
+```python
+def train_dcgan(generator, discriminator, train_loader, epochs=50,
+                lr=2e-4, beta1=0.5):
+    """训练 DCGAN"""
+    criterion = nn.BCELoss()
+    g_optimizer = optim.Adam(generator.parameters(), lr=lr, betas=(beta1, 0.999))
+    d_optimizer = optim.Adam(discriminator.parameters(), lr=lr, betas=(beta1, 0.999))
+
+    g_losses, d_losses = [], []
+    fixed_noise = torch.randn(64, LATENT_DIM, device=DEVICE)
+
+    for epoch in range(epochs):
+        g_epoch_loss, d_epoch_loss = 0.0, 0.0
+        num_batches = len(train_loader)
+
+        for real_images, _ in train_loader:
+            real_images = real_images.to(DEVICE)
+            batch_size = real_images.size(0)
+
+            # 标签（真实=1，伪造=0）
+            real_labels = torch.ones(batch_size, 1, device=DEVICE)
+            fake_labels = torch.zeros(batch_size, 1, device=DEVICE)
+
+            # ---- 训练判别器 ----
+            d_optimizer.zero_grad()
+
+            # 对真实图像的损失
+            real_output = discriminator(real_images)
+            d_loss_real = criterion(real_output, real_labels)
+
+            # 对伪造图像的损失
+            noise = torch.randn(batch_size, LATENT_DIM, device=DEVICE)
+            fake_images = generator(noise)
+            fake_output = discriminator(fake_images.detach())
+            # .detach() 非常重要：不将梯度传播到生成器
+            d_loss_fake = criterion(fake_output, fake_labels)
+
+            d_loss = d_loss_real + d_loss_fake
+            d_loss.backward()
+            d_optimizer.step()
+
+            # ---- 训练生成器（非饱和损失）----
+            g_optimizer.zero_grad()
+
+            noise = torch.randn(batch_size, LATENT_DIM, device=DEVICE)
+            fake_images = generator(noise)
+            fake_output = discriminator(fake_images)
+            # 生成器希望判别器将伪造的视为真实
+            g_loss = criterion(fake_output, real_labels)
+
+            g_loss.backward()
+            g_optimizer.step()
+
+            g_epoch_loss += g_loss.item()
+            d_epoch_loss += d_loss.item()
+
+        g_losses.append(g_epoch_loss / num_batches)
+        d_losses.append(d_epoch_loss / num_batches)
+
+        print(f"Epoch [{epoch+1}/{epochs}]  "
+              f"D_Loss: {d_losses[-1]:.4f}  "
+              f"G_Loss: {g_losses[-1]:.4f}")
+
+        # 每隔 5 个 epoch 展示生成结果
+        if (epoch + 1) % 5 == 0:
+            generator.eval()
+            with torch.no_grad():
+                fake = generator(fixed_noise).cpu()
+            grid = make_grid(fake, nrow=8, normalize=True)
+            plt.figure(figsize=(6, 6))
+            plt.imshow(grid.permute(1, 2, 0).squeeze(), cmap='gray')
+            plt.title(f'Epoch {epoch+1}')
+            plt.axis('off')
+            plt.show()
+            generator.train()
+
+    return g_losses, d_losses
+```
+
+### 可视化训练过程
+
+```python
+def plot_training_curves(g_losses, d_losses):
+    """绘制生成器和判别器的损失曲线"""
+    fig, ax = plt.subplots(figsize=(8, 4))
+    epochs = range(1, len(g_losses) + 1)
+    ax.plot(epochs, g_losses, label='生成器损失', alpha=0.8, linewidth=2)
+    ax.plot(epochs, d_losses, label='判别器损失', alpha=0.8, linewidth=2)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.set_title('GAN 训练曲线')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.show()
+```
+
+## GAN 训练的不稳定性
+
+训练 GAN 比训练常规神经网络困难得多。以下是常见问题及解决方案：
+
+### 模式崩塌（Mode Collapse）
+
+生成器只学会生成少数几种样本（甚至一种），"欺骗"判别器后就停止探索。
+
+**对策**：
+- 使用**小批判别**（minibatch discrimination）
+- 使用**Wasserstein GAN（WGAN）**，用 Wasserstein 距离替代 JS 散度
+- 使用**unrolled GAN** 让生成器"预见"判别器更新后的反应
+- 尝试**PacGAN**：判别器基于多个样本打包判断
+
+### 梯度消失/爆炸
+
+当判别器变得太强或太弱时，生成器都会收到无用梯度。
+
+**稳定训练的技巧**：
+
+1. **标签平滑（Label Smoothing）**：将真实标签从 1.0 平滑到 0.9（减少判别器过度自信）
+2. **使用 LeakyReLU**（非 ReLU）：防止判别器中梯度稀疏
+3. **Adam 优化器**，$\beta_1=0.5$（降低动量，使训练更稳定）
+4. **批归一化**：在生成器和判别器中都使用
+5. **平衡的学习率**：生成器学习率通常略小于判别器
+
+```python
+# 标签平滑技巧示例
+def smooth_labels(labels, smoothing=0.1):
+    """对真实标签进行单边平滑"""
+    with torch.no_grad():
+        labels = labels * (1 - smoothing)
+    return labels  # 真实标签从 1.0 变为 0.9
+```
+
+## 生成插值与潜在空间漫游
+
+在潜在空间中两个噪声向量之间进行线性插值，可以看到图像的平滑过渡：
+
+```python
+def latent_space_interpolation(generator, n_steps=10):
+    """在两个随机噪声向量之间插值"""
+    generator.eval()
+    z1 = torch.randn(1, LATENT_DIM, device=DEVICE)
+    z2 = torch.randn(1, LATENT_DIM, device=DEVICE)
+
+    images = []
+    for alpha in np.linspace(0, 1, n_steps):
+        z_interp = (1 - alpha) * z1 + alpha * z2
+        with torch.no_grad():
+            img = generator(z_interp).cpu().squeeze()
+        images.append(img)
+
+    # 可视化
+    fig, axes = plt.subplots(1, n_steps, figsize=(n_steps * 1.5, 2))
+    for ax, img in zip(axes, images):
+        ax.imshow(img, cmap='gray')
+        ax.axis('off')
+    plt.suptitle('潜在空间线性插值')
+    plt.show()
+```
+
+## GAN 家族概览
+
+GAN 自诞生以来涌现了大量变体：
+
+- **Conditional GAN（cGAN）**：将类别标签作为额外条件输入，实现可控生成
+- **CycleGAN**：无配对的图像到图像翻译（马<->斑马，照片<->画作）
+- **StyleGAN/StyleGAN2**：逐层注入风格向量，生成超高分辨率、可控的人脸。引入了自适应实例归一化（AdaIN）和映射网络
+- **WGAN/WGAN-GP**：使用 Wasserstein 距离和梯度惩罚，显著提升训练稳定性
+- **Pix2Pix**：有配对的图像到图像翻译
+- **BigGAN**：大规模条件 GAN，在 ImageNet 上生成极其逼真的图像
+
+## 总结
+
+GAN 代表了深度学习生成模型的一个范式转变——用对抗博弈而非显式概率建模来学习数据分布。虽然训练不稳定是主要挑战，但通过 DCGAN 架构设计、标签平滑、批归一化和精心调参，可以在 MNIST 等小规模数据上获得令人满意的生成效果。
+
+关键要点：
+- GAN 是生成器与判别器的动态博弈
+- 使用非饱和损失和 `detach()` 保证正确的梯度流
+- DCGAN 的架构设计准则（步幅卷积、BatchNorm、LeakyReLU）是实践基础
+- 模式崩塌是 GAN 的经典失败模式，了解其症状和对策至关重要
+- 潜在空间插值展示了 GAN 学到的有意义的连续表示
+
+GAN 的旅程是理解无监督学习和生成模型深度结合的最佳起点——从对抗博弈的优雅数学到令人惊叹的视觉生成，它始终是深度学习中最激动人心的领域之一。

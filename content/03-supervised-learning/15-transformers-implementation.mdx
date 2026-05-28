@@ -1,0 +1,457 @@
+---
+title: "Transformer 实战：编码器实现与注意力可视化"
+description: "从零构建 Transformer 编码器，使用 PyTorch 内置模块进行文本分类，并可视化注意力权重以理解模型内部行为。"
+part: "03-supervised-learning"
+order: 15
+difficulty: "advanced"
+estimatedMinutes: 45
+objectives:
+  - "使用 nn.MultiheadAttention 构建 Transformer 编码器层"
+  - "从零实现完整的 Transformer 编码器（含位置编码）"
+  - "训练文本分类模型并可视化注意力 heatmap"
+  - "理解 BERT 和 GPT 的变体差异"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra", "dnn-architecture", "transformers-intro"]
+keywords: ["MultiheadAttention", "TransformerEncoder", "注意力可视化", "BERT", "GPT", "位置编码"]
+---
+
+## nn.MultiheadAttention 快速上手
+
+PyTorch 从 1.x 开始内置了高效的 `nn.MultiheadAttention`。关键参数：
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+import matplotlib.pyplot as plt
+import numpy as np
+
+d_model = 512
+num_heads = 8
+
+# batch_first=True：输入格式为 (batch, seq_len, embed_dim)
+mha = nn.MultiheadAttention(
+    embed_dim=d_model,    # 模型总维度（必须能被 num_heads 整除）
+    num_heads=num_heads,   # 注意力头数量
+    dropout=0.1,
+    batch_first=True,      # PyTorch 2.0+ 推荐设为 True
+)
+
+# 自注意力：Q, K, V 来自同一序列
+x = torch.randn(4, 10, d_model)  # (batch=4, seq_len=10, d_model=512)
+attn_output, attn_weights = mha(x, x, x, need_weights=True,
+                                  average_attn_weights=False)
+print("注意力输出形状:", attn_output.shape)     # (4, 10, 512)
+print("注意力权重形状:", attn_weights.shape)    # (4, 8, 10, 10)
+# attn_weights[b, h, i, j] = 样本 b 第 h 个头中，位置 i 对位置 j 的关注度
+
+# 使用 attention mask（屏蔽某些位置）
+# mask 形状: (seq_len, seq_len) 或 (batch * num_heads, seq_len, seq_len)
+# mask[i, j] = True 表示位置 i 不能关注位置 j（变为 -inf）
+causal_mask = torch.triu(torch.ones(10, 10), diagonal=1).bool()
+attn_out_masked, _ = mha(x, x, x, attn_mask=causal_mask)
+print("因果掩码后输出形状:", attn_out_masked.shape)  # (4, 10, 512)
+```
+
+## 位置编码实现
+
+位置编码是 Transformer 中唯一注入序列顺序信息的组件。除了正弦编码，也可以使用可学习的位置嵌入（learned positional embeddings），BERT 和 GPT 均采用后者。
+
+```python
+class PositionalEncoding(nn.Module):
+    """支持两种模式: 'sinusoidal' 或 'learned'"""
+    def __init__(self, d_model, max_len=512, mode='sinusoidal', dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        if mode == 'sinusoidal':
+            pe = torch.zeros(max_len, d_model)
+            position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+            div_term = torch.exp(
+                torch.arange(0, d_model, 2).float()
+                * (-math.log(10000.0) / d_model)
+            )
+            pe[:, 0::2] = torch.sin(position * div_term)
+            pe[:, 1::2] = torch.cos(position * div_term)
+            self.register_buffer('pe', pe.unsqueeze(0))
+        elif mode == 'learned':
+            self.pe = nn.Parameter(torch.randn(1, max_len, d_model))
+        else:
+            raise ValueError(f"未知模式: {mode}")
+        self.mode = mode
+
+    def forward(self, x):
+        # x: (batch, seq_len, d_model)
+        x = x + self.pe[:, :x.size(1)]
+        return self.dropout(x)
+
+# 测试两种编码
+x = torch.randn(2, 20, 128)
+pos_enc_sin = PositionalEncoding(128, mode='sinusoidal')
+pos_enc_learned = PositionalEncoding(128, mode='learned')
+print("正弦编码输出:", pos_enc_sin(x).shape)
+print("可学习编码输出:", pos_enc_learned(x).shape)
+```
+
+## 从零构建 Transformer 编码器层
+
+整合注意力、前馈网络、残差连接和层归一化：
+
+```python
+class TransformerEncoderLayer(nn.Module):
+    """手工实现 Transformer 编码器层（与 nn.TransformerEncoderLayer 等价）"""
+    def __init__(self, d_model, num_heads, d_ff, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, num_heads,
+                                                dropout=dropout,
+                                                batch_first=True)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),  # 现代 Transformer 多用 GELU 代替 ReLU
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None):
+        # Pre-LN 风格（先归一化再经过子层）—— 训练更稳定
+        # 1. 自注意力子层
+        residual = x
+        x = self.norm1(x)
+        attn_out, _ = self.self_attn(x, x, x, attn_mask=mask)
+        x = residual + self.dropout1(attn_out)
+
+        # 2. 前馈子层
+        residual = x
+        x = self.norm2(x)
+        ff_out = self.feed_forward(x)
+        x = residual + self.dropout2(ff_out)
+        return x
+
+
+# 测试编码器层
+encoder_layer = TransformerEncoderLayer(d_model=512, num_heads=8, d_ff=2048)
+x = torch.randn(4, 10, 512)  # (batch, seq_len, d_model)
+out = encoder_layer(x)
+print("编码器层输出形状:", out.shape)  # (4, 10, 512)
+print("输出与输入同形——这是残差连接的保证")
+```
+
+## 完整 Transformer 编码器
+
+堆叠多个编码器层 + 嵌入 + 位置编码 + 分类头，构成端到端的文本分类模型：
+
+```python
+class TransformerClassifier(nn.Module):
+    """基于 Transformer 编码器的文本分类模型"""
+    def __init__(self, vocab_size, d_model=256, num_heads=8, num_layers=4,
+                 d_ff=1024, max_len=512, num_classes=2, dropout=0.1,
+                 pad_idx=0):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, d_model,
+                                             padding_idx=pad_idx)
+        self.positional_encoding = PositionalEncoding(
+            d_model, max_len, mode='sinusoidal', dropout=dropout)
+
+        # 堆叠多个编码器层
+        self.encoder_layers = nn.ModuleList([
+            TransformerEncoderLayer(d_model, num_heads, d_ff, dropout)
+            for _ in range(num_layers)
+        ])
+
+        self.final_norm = nn.LayerNorm(d_model)
+
+        # 分类头：取 [CLS] 位置（第 0 个 token）的表示
+        self.classifier = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.Tanh(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, num_classes),
+        )
+
+    def forward(self, x, mask=None):
+        # x: (batch, seq_len) —— token 索引
+        x = self.token_embedding(x) * math.sqrt(self.token_embedding.embedding_dim)
+        x = self.positional_encoding(x)
+
+        for layer in self.encoder_layers:
+            x = layer(x, mask)
+
+        x = self.final_norm(x)
+        # 取 [CLS] token 的表示（第一个 token）用于分类
+        cls_output = x[:, 0, :]
+        return self.classifier(cls_output)
+
+
+# 初始化
+model = TransformerClassifier(
+    vocab_size=30000,
+    d_model=256,
+    num_heads=8,
+    num_layers=4,
+    d_ff=1024,
+    num_classes=2,
+    dropout=0.1,
+)
+# 模拟输入
+batch_tokens = torch.randint(0, 30000, (16, 100))  # 16 条文本，每条 100 个 token
+logits = model(batch_tokens)
+print("分类 logits 形状:", logits.shape)  # (16, 2)
+print(f"模型参数量: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
+```
+
+## 使用 nn.TransformerEncoderLayer
+
+PyTorch 内置的编码器层功能更丰富，且性能更优：
+
+```python
+# 内置版本（功能完全一致，但底层用 C++/CUDA 优化）
+builtin_encoder_layer = nn.TransformerEncoderLayer(
+    d_model=256,
+    nhead=8,
+    dim_feedforward=1024,
+    dropout=0.1,
+    activation='gelu',       # 支持 relu / gelu
+    batch_first=True,
+    norm_first=True,         # Pre-LN（推荐）
+)
+
+# 堆叠为完整编码器
+encoder = nn.TransformerEncoder(builtin_encoder_layer, num_layers=4)
+
+# 使用
+x = torch.randn(16, 100, 256)
+# src_key_padding_mask: (batch, seq_len)，True 表示 padding 位置
+padding_mask = torch.zeros(16, 100, dtype=torch.bool)
+padding_mask[:, 80:] = True  # 后 20 个位置设为 padding
+out = encoder(x, src_key_padding_mask=padding_mask)
+print("内置编码器输出:", out.shape)  # (16, 100, 256)
+```
+
+## 训练文本分类模型
+
+以情感分类（正面/负面）为例的完整训练流程：
+
+```python
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+
+def train_transformer_classifier():
+    """完整的训练流程（精简版）"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # 注意：此处为简化演示，实际训练需要真实数据
+    # 通常使用 HuggingFace datasets 或 torchtext 加载
+
+    # 模拟数据
+    num_samples = 1000
+    vocab_size = 5000
+    max_len = 64
+
+    # 随机生成模拟数据（实际中应从真实语料构建）
+    X = torch.randint(1, vocab_size, (num_samples, max_len))
+    y = torch.randint(0, 2, (num_samples,))  # 二分类
+    # 将第一个 token 设为 CLS（通常为 1），最后一个 token 设为 SEP（通常为 2）
+    X[:, 0] = 1   # [CLS]
+    # 随机长度模拟（尾部填充 0）
+    lengths = torch.randint(20, max_len + 1, (num_samples,))
+    for i in range(num_samples):
+        X[i, lengths[i]:] = 0  # PAD = 0
+
+    dataset = TensorDataset(X, y, lengths)
+    train_size = int(0.8 * num_samples)
+    train_ds = TensorDataset(X[:train_size], y[:train_size], lengths[:train_size])
+    test_ds = TensorDataset(X[train_size:], y[train_size:], lengths[train_size:])
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=32, shuffle=False)
+
+    # 模型
+    model = TransformerClassifier(
+        vocab_size=vocab_size, d_model=128, num_heads=4,
+        num_layers=3, d_ff=512, max_len=max_len, num_classes=2,
+        dropout=0.2, pad_idx=0
+    ).to(device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = AdamW(model.parameters(), lr=1e-4, weight_decay=0.01)
+    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2)
+
+    num_epochs = 20
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss, correct, total = 0, 0, 0
+        for batch_X, batch_y, batch_len in train_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+            # 创建 padding mask
+            pad_mask = torch.arange(max_len).unsqueeze(0).to(device)
+            pad_mask = pad_mask >= batch_len.unsqueeze(1).to(device)
+
+            optimizer.zero_grad()
+            logits = model(batch_X)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
+
+            total_loss += loss.item() * batch_X.size(0)
+            correct += (logits.argmax(1) == batch_y).sum().item()
+            total += batch_X.size(0)
+
+        train_acc = 100. * correct / total
+        if (epoch + 1) % 5 == 0:
+            print(f"Epoch {epoch+1:2d}/{num_epochs} | "
+                  f"Loss: {total_loss/total:.4f} | "
+                  f"Train Acc: {train_acc:.2f}%")
+
+    print("训练完成")
+    return model, test_loader
+
+# 执行训练
+# model, test_loader = train_transformer_classifier()
+print("训练函数已定义，取消注释上方的调用即可运行")
+```
+
+## 可视化注意力权重
+
+注意力可视化是 Transformer 最有价值的诊断工具之一——直接展示模型在做出预测时关注了哪些输入位置。
+
+```python
+def visualize_attention(model, input_tokens, tokenizer_decode_fn,
+                         layer_idx=-1, head_indices=None):
+    """
+    可视化 Transformer 的注意力权重
+    model: 训练好的 Transformer 模型（需要返回注意力权重）
+    input_tokens: (seq_len,) —— 单个样本的 token 索引
+    tokenizer_decode_fn: 将 token 索引映射为可读文本的函数
+    layer_idx: 可视化哪一层（-1 表示最后一层）
+    head_indices: 可视化哪些头（None 表示全部）
+    """
+    model.eval()
+    device = next(model.parameters()).device
+
+    # 为捕获注意力权重，需要注册 hook 或使用 need_weights=True
+    with torch.no_grad():
+        x = torch.tensor([input_tokens], device=device)
+        x_emb = model.token_embedding(x) * math.sqrt(
+            model.token_embedding.embedding_dim)
+        x_emb = model.positional_encoding(x_emb)
+
+        # 获取指定层的注意力权重
+        target_layer = model.encoder_layers[layer_idx]
+        attn_out, attn_weights = target_layer.self_attn(
+            target_layer.norm1(x_emb),
+            target_layer.norm1(x_emb),
+            target_layer.norm1(x_emb),
+            need_weights=True,
+            average_attn_weights=False,
+        )
+
+    # attn_weights: (1, num_heads, seq_len, seq_len)
+    attn_weights = attn_weights.squeeze(0).cpu().numpy()
+
+    tokens = [tokenizer_decode_fn(t) for t in input_tokens]
+    # 过滤掉 padding token
+    valid_len = sum(1 for t in input_tokens if t != 0)
+    tokens = tokens[:valid_len]
+
+    if head_indices is None:
+        head_indices = list(range(attn_weights.shape[0]))
+
+    num_heads = len(head_indices)
+    fig, axes = plt.subplots(1, num_heads, figsize=(4 * num_heads, 4))
+    if num_heads == 1:
+        axes = [axes]
+
+    for ax, head_idx in zip(axes, head_indices):
+        im = ax.imshow(attn_weights[head_idx, :valid_len, :valid_len],
+                       cmap='Blues', aspect='auto', vmin=0, vmax=1)
+        ax.set_xticks(range(valid_len))
+        ax.set_yticks(range(valid_len))
+        ax.set_xticklabels(tokens, rotation=90, fontsize=8)
+        ax.set_yticklabels(tokens, fontsize=8)
+        ax.set_title(f"Head {head_idx}")
+
+    plt.colorbar(im, ax=axes, shrink=0.6)
+    plt.tight_layout()
+    plt.savefig("attention_heatmap.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    print("注意力热力图已保存: attention_heatmap.png")
+
+# 使用示例（需要先训练好模型）
+# sample_text = "这部电影非常精彩，演员表演出色"
+# sample_tokens = tokenizer.encode(sample_text)  # 需要实际的 tokenizer
+# visualize_attention(model, sample_tokens, lambda t: tokenizer.decode([t]))
+```
+
+## 注意力权重的诊断价值
+
+观察注意力热力图可以回答以下问题：
+
+- **头是否有特定功能模式？** 某些头可能专注于相邻词（对角线附近高亮），某些头可能关注 [CLS] 或标点。
+- **模型是否过度关注特定位置？** 如果所有头都只关注第 0 个位置（通常是 [CLS]），说明模型可能过拟合或训练不充分。
+- **长距离依赖是否被捕捉？** 查看非对角线区域的注意力是否合理。例如，在指代消解任务中，代词位置应高度关注其先行词位置。
+
+```python
+# 注意力模式的分类（常见类型）
+attention_patterns = {
+    "对角注意力": "每个位置主要关注自己 (token 独立性假设)",
+    "邻域注意力": "关注前后几个词 (类似于 CNN 的局部窗口)",
+    "全局注意力": "均匀关注所有位置 (类似平均池化)",
+    "句法注意力": "关注特定语法角色 (主语-谓语)",
+    "垂直注意力": "所有位置都关注 [CLS] 或第一个 token",
+}
+for name, desc in attention_patterns.items():
+    print(f"  {name}: {desc}")
+```
+
+## BERT 与 GPT：编码器 vs 解码器
+
+原始 Transformer 是编码器-解码器架构（用于机器翻译）。但现代预训练语言模型通常只使用其中一部分：
+
+**BERT（编码器-only）**：
+- 使用双向自注意力（每个 token 可以看到所有其他 token）
+- 训练目标：掩码语言模型（MLM）+ 下一句预测（NSP）
+- 最适合理解任务：分类、命名实体识别、问答
+
+**GPT（解码器-only）**：
+- 使用因果/单向掩码（每个 token 只能看到之前的 token）
+- 训练目标：自回归语言模型（预测下一个 token）
+- 最适合生成任务：文本生成、对话、代码补全
+
+```python
+# 因果掩码（GPT 风格）：只能看到过去
+def create_causal_mask(seq_len):
+    """上三角矩阵为 True 的位置被屏蔽（设为 -inf）"""
+    mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()
+    return mask  # True = 屏蔽该位置
+
+# 示例
+causal_mask_5 = create_causal_mask(5)
+print("因果掩码 (5×5):")
+print(causal_mask_5.int().numpy())
+# 第 0 行: [0, 1, 1, 1, 1] —— 位置 0 只能看到自己
+# 第 2 行: [0, 0, 0, 1, 1] —— 位置 2 可以看到 0, 1, 2
+# 第 4 行: [0, 0, 0, 0, 0] —— 位置 4 可以看到所有
+
+# BERT 风格：使用双向注意力 + padding mask（屏蔽 [PAD] token）
+# 不需要因果掩码，所有 token 可以看到彼此
+```
+
+## 总结：Transformer 的关键组件清单
+
+回顾构建一个完整 Transformer 编码器所需的核心模块：
+
+1. **Token Embedding**：将离散 token 映射为连续向量；嵌入维度需乘以 $\sqrt{d_{model}}$ 以平衡规模
+2. **Positional Encoding**：注入位置信息（正弦或可学习）
+3. **Multi-Head Self-Attention**：计算序列内所有位置对之间的关注度
+4. **Feed-Forward Network**：位置独立的非线性变换（通常为两层，$d_{model} \to d_{ff} \to d_{model}$）
+5. **Residual Connections**：每个子层后添加，$x + \text{Sublayer}(x)$
+6. **Layer Normalization**：Pre-LN 风格（先归一化再进入子层）
+7. **Dropout**：应用于注意力权重、FFN 中间层、残差连接
+
+这些组件的组合高度模块化，可以通过修改任一组件来适配不同的任务需求。

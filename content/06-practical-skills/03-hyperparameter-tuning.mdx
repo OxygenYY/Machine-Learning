@@ -1,0 +1,358 @@
+---
+title: "超参数调优"
+description: "从 Grid Search 到 Bayesian Optimization，掌握 Optuna 自动化调参与学习率查找器等实用技术"
+part: "06-practical-skills"
+order: 3
+difficulty: "intermediate"
+estimatedMinutes: 35
+objectives:
+  - "理解超参数与模型参数的区别"
+  - "掌握 Grid Search、Random Search 和 Bayesian Optimization 的原理与优劣"
+  - "学会使用 Optuna 进行自动化超参数搜索"
+  - "实现学习率查找器选择合适的初始学习率"
+  - "了解批大小对训练的影响"
+  - "学会使用早停(Pruning)策略加速搜索"
+prerequisites: ["python-basics", "training-dnn", "cross-validation"]
+keywords: ["hyperparameter-tuning", "optuna", "grid-search", "bayesian-optimization", "learning-rate-finder"]
+---
+
+# 一、超参数 vs 模型参数
+
+在深入调优之前，先明确两个概念：
+
+| | 模型参数 (Parameters) | 超参数 (Hyperparameters) |
+|---|---|---|
+| **定义** | 模型从数据中学到的值 | 在训练开始前由人工设定的值 |
+| **示例** | 权重 w、偏置 b、卷积核 | 学习率、批大小、网络层数、dropout 率 |
+| **更新方式** | 通过梯度下降等优化算法自动更新 | 由开发者手动调整或通过调优算法选择 |
+| **数量** | 百万到数十亿 | 通常十几个到几十个 |
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+import optuna
+import matplotlib.pyplot as plt
+
+# 准备示例数据
+X, y = make_classification(n_samples=2000, n_features=30, n_informative=15,
+                           n_redundant=5, random_state=42)
+X = X.astype(np.float32)
+y = y.astype(np.int64)
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+train_dataset = TensorDataset(torch.tensor(X_train), torch.tensor(y_train))
+val_dataset = TensorDataset(torch.tensor(X_val), torch.tensor(y_val))
+```
+
+# 二、Grid Search（网格搜索）
+
+网格搜索是最朴素的超参数调优方法：在所有超参数的所有取值组合上进行穷举搜索。
+
+```python
+def train_evaluate(lr, hidden_size, dropout_rate, batch_size=64):
+    """训练并返回验证准确率的辅助函数"""
+    model = nn.Sequential(
+        nn.Linear(30, hidden_size), nn.ReLU(), nn.Dropout(dropout_rate),
+        nn.Linear(hidden_size, hidden_size // 2), nn.ReLU(), nn.Dropout(dropout_rate),
+        nn.Linear(hidden_size // 2, 2)
+    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    for epoch in range(30):
+        model.train()
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(batch_X), batch_y)
+            loss.backward()
+            optimizer.step()
+
+    # 验证
+    model.eval()
+    correct, total = 0, 0
+    with torch.no_grad():
+        for batch_X, batch_y in val_loader:
+            outputs = model(batch_X)
+            correct += (outputs.argmax(1) == batch_y).sum().item()
+            total += batch_y.size(0)
+    return correct / total
+
+
+# 网格搜索
+print("=== Grid Search ===")
+learning_rates = [0.0001, 0.001, 0.01]
+hidden_sizes = [32, 64, 128]
+dropout_rates = [0.2, 0.5]
+
+best_acc = 0
+best_params = None
+results_grid = []
+
+for lr in learning_rates:
+    for hs in hidden_sizes:
+        for dr in dropout_rates:
+            acc = train_evaluate(lr, hs, dr)
+            results_grid.append({'lr': lr, 'hidden_size': hs, 'dropout': dr, 'acc': acc})
+            print(f"  lr={lr:.4f}, hidden={hs}, dropout={dr:.1f} => Acc={acc:.4f}")
+            if acc > best_acc:
+                best_acc = acc
+                best_params = {'lr': lr, 'hidden_size': hs, 'dropout': dr}
+
+print(f"\n最优参数: {best_params}, 准确率: {best_acc:.4f}")
+print(f"总共训练次数: {len(learning_rates) * len(hidden_sizes) * len(dropout_rates)}")
+```
+
+**优点**：简单、可并行、结果可解释
+**缺点**：维度灾难——3 个参数各取 5 个值就是 125 种组合，10 个参数就是指数级爆炸
+
+# 三、Random Search（随机搜索）
+
+随机搜索在超参数空间中随机采样，比网格搜索效率更高——因为它可以探索更多不同的值（而非在固定格点上穷举）。
+
+```python
+print("\n=== Random Search ===")
+np.random.seed(42)
+n_trials = 15  # 与网格搜索的 18 次接近，公平比较
+
+best_acc_r = 0
+best_params_r = None
+
+for i in range(n_trials):
+    # 在对数空间采样学习率（比均匀采样合理得多）
+    lr = 10 ** np.random.uniform(-4, -1)  # 10^-4 到 10^-1
+    hs = np.random.choice([16, 32, 48, 64, 96, 128, 192, 256])
+    dr = np.random.uniform(0.1, 0.6)
+
+    acc = train_evaluate(lr, hs, dr)
+    print(f"  Trial {i+1}: lr={lr:.6f}, hidden={hs}, dropout={dr:.3f} => Acc={acc:.4f}")
+    if acc > best_acc_r:
+        best_acc_r = acc
+        best_params_r = {'lr': lr, 'hidden_size': hs, 'dropout': dr}
+
+print(f"\n最优参数: {best_params_r}, 准确率: {best_acc_r:.4f}")
+```
+
+**为什么随机搜索更好？** 论文（Bergstra & Bengio, 2012）证明：当只有少数几个超参数真正重要时（大多数情况下确实如此），随机搜索能在相同预算下比网格搜索探索到更多不同的重要参数取值。
+
+# 四、Optuna：贝叶斯优化
+
+Optuna 使用贝叶斯优化——它维护一个关于"超参数→性能"的概率模型（通常是 Tree-structured Parzen Estimator, TPE），每次选择最有希望的超参数来尝试。
+
+```python
+def objective(trial):
+    """Optuna 的目标函数：给定超参数，返回验证性能"""
+    # 超参数建议
+    lr = trial.suggest_float('lr', 1e-4, 1e-1, log=True)
+    hidden_size = trial.suggest_int('hidden_size', 16, 256, step=16)
+    dropout_rate = trial.suggest_float('dropout_rate', 0.1, 0.6)
+    batch_size = trial.suggest_categorical('batch_size', [32, 64, 128])
+    optimizer_name = trial.suggest_categorical('optimizer', ['Adam', 'SGD'])
+
+    # 构建模型
+    model = nn.Sequential(
+        nn.Linear(30, hidden_size), nn.ReLU(), nn.Dropout(dropout_rate),
+        nn.Linear(hidden_size, hidden_size // 2), nn.ReLU(), nn.Dropout(dropout_rate),
+        nn.Linear(hidden_size // 2, 2)
+    )
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+
+    if optimizer_name == 'Adam':
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+    else:
+        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+
+    criterion = nn.CrossEntropyLoss()
+
+    # 训练 + 定期验证（用于 Pruning）
+    for epoch in range(50):
+        model.train()
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            loss = criterion(model(batch_X), batch_y)
+            loss.backward()
+            optimizer.step()
+
+        # 中间验证
+        model.eval()
+        correct, total = 0, 0
+        with torch.no_grad():
+            for batch_X, batch_y in val_loader:
+                outputs = model(batch_X)
+                correct += (outputs.argmax(1) == batch_y).sum().item()
+                total += batch_y.size(0)
+        intermediate_acc = correct / total
+
+        # 报告中间结果，让 Optuna 判断是否要剪枝
+        trial.report(intermediate_acc, epoch)
+
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
+
+    return intermediate_acc
+
+
+# 运行 Optuna 优化
+print("\n=== Optuna Bayesian Optimization ===")
+study = optuna.create_study(
+    direction='maximize',
+    pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=10)
+)
+study.optimize(objective, n_trials=20, show_progress_bar=False)
+
+print(f"\n最优试验: Trial {study.best_trial.number}")
+print(f"最优准确率: {study.best_value:.4f}")
+print(f"最优参数: {study.best_params}")
+
+# 可视化参数重要性
+optuna.visualization.matplotlib.plot_param_importances(study)
+plt.title("超参数重要性", fontsize=14)
+plt.tight_layout()
+plt.show()
+```
+
+**Optuna 的核心优势**：
+1. **Define-by-Run**：在目标函数中用 `trial.suggest_*` 动态定义搜索空间
+2. **Pruning**：自动终止没有前景的试验，将算力集中在有希望的参数区域
+3. **并行化**：多个 trial 可以并行运行
+4. **可视化**：内置参数重要性、优化历史等图表
+
+# 五、学习率查找器 (LR Finder)
+
+学习率是最重要的超参数。Leslie Smith 提出了一种系统化的方法来找到合适的初始学习率：
+
+```python
+def lr_finder(model, train_loader, init_lr=1e-7, final_lr=10, num_iters=200):
+    """学习率查找器：指数增长学习率并记录 loss"""
+    model_clone = nn.Sequential(
+        nn.Linear(30, 64), nn.ReLU(),
+        nn.Linear(64, 32), nn.ReLU(),
+        nn.Linear(32, 2)
+    )  # 简化模型用于演示
+
+    optimizer = optim.Adam(model_clone.parameters(), lr=init_lr)
+    criterion = nn.CrossEntropyLoss()
+
+    # 计算乘法因子
+    gamma = (final_lr / init_lr) ** (1 / num_iters)
+
+    lrs, losses = [], []
+    data_iter = iter(train_loader)
+
+    for i in range(num_iters):
+        # 指数增长学习率
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = init_lr * (gamma ** i)
+
+        try:
+            batch_X, batch_y = next(data_iter)
+        except StopIteration:
+            data_iter = iter(train_loader)
+            batch_X, batch_y = next(data_iter)
+
+        optimizer.zero_grad()
+        loss = criterion(model_clone(batch_X), batch_y)
+        loss.backward()
+        optimizer.step()
+
+        lrs.append(init_lr * (gamma ** i))
+        losses.append(loss.item())
+
+        # 如果 loss 爆炸则停止
+        if i > 0 and loss.item() > 4 * np.mean(losses[:i]):
+            break
+
+    # 绘图
+    plt.figure(figsize=(10, 5))
+    plt.semilogx(lrs, losses)
+    plt.xlabel('学习率 (log scale)', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('学习率查找器: 选择 loss 下降最快的点', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+    # 推荐学习率：loss 下降最快的区域（通常取最小值的 1/10）
+    min_loss_idx = np.argmin(losses)
+    suggested_lr = lrs[min_loss_idx] / 10
+    print(f"建议学习率: {suggested_lr:.2e} (最小 loss 对应 lr 的 1/10)")
+    return suggested_lr
+
+
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+lr_finder(None, train_loader, num_iters=150)
+```
+
+**解释**：学习率太小→loss 几乎不变；学习率合适→loss 快速下降；学习率太大→loss 震荡甚至爆炸。好的学习率应该选在 loss 下降最快的那一段（通常比最小 loss 对应的学习率略小一些）。
+
+# 六、批大小 (Batch Size) 的选择
+
+| 小批大小 (16-32) | 大批大小 (256-1024) |
+|---|---|
+| 梯度噪声大，有正则化效果 | 梯度估计更准确 |
+| 训练速度慢（更多次参数更新） | 训练速度快（更少次参数更新） |
+| 对 GPU 利用率低 | 充分利用 GPU 并行能力 |
+| 容易逃离局部极小值 | 可能收敛到更尖锐的极小值 |
+
+```python
+# 实验：不同批大小对训练的影响
+batch_sizes = [16, 64, 256]
+results_batch = {}
+
+for bs in batch_sizes:
+    loader = DataLoader(train_dataset, batch_size=bs, shuffle=True)
+    model = nn.Sequential(nn.Linear(30, 64), nn.ReLU(), nn.Linear(64, 2))
+    optimizer = optim.SGD(model.parameters(), lr=0.01)
+    criterion = nn.CrossEntropyLoss()
+
+    losses = []
+    for epoch in range(30):
+        for batch_X, batch_y in loader:
+            optimizer.zero_grad()
+            loss = criterion(model(batch_X), batch_y)
+            loss.backward()
+            optimizer.step()
+            losses.append(loss.item())
+    results_batch[bs] = losses
+
+plt.figure(figsize=(10, 5))
+for bs, losses in results_batch.items():
+    # 平滑后绘图
+    smoothed = np.convolve(losses, np.ones(10)/10, mode='valid')
+    plt.plot(smoothed, label=f'Batch Size = {bs}')
+plt.xlabel('Step', fontsize=12)
+plt.ylabel('Loss (平滑后)', fontsize=12)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.title('不同批大小下的训练曲线', fontsize=14)
+plt.show()
+```
+
+**经验法则**：在 GPU 显存允许的范围内选择最大的批大小，然后按比例调整学习率（批大小翻倍 → 学习率也翻倍，即 Linear Scaling Rule）。
+
+# 七、调优策略总结
+
+1. **第一步**：用 LR Finder 确定合理的学习率范围。
+2. **第二步**：固定学习率，用 Random Search 或 Optuna 粗调其他超参数。
+3. **第三步**：锁定最敏感的 2-3 个参数，用 Optuna 进行精细调优。
+4. **第四步**：对最终候选参数做交叉验证，确保结果稳定。
+
+**最重要的经验**：在开始大规模超参数调优之前，先确保你的训练流程本身是正确且稳定的（参考下一课"调试模型"）。
+
+# 八、关键要点
+
+1. 超参数（学习率、架构等）由人工设定，模型参数（权重、偏置）从数据学习。
+2. Grid Search 简单但低效，Random Search 在有限预算下通常更好。
+3. Optuna 的贝叶斯优化能智能地选择下一组尝试的超参数，显著减少试错次数。
+4. 学习率是最重要的超参数——一定要用 LR Finder 找到合理起点。
+5. 大 Batch Size 可以用更大的学习率（Linear Scaling Rule）。
+6. Optuna 的 Pruning 功能能提前终止不好的试验，节省大量计算资源。
+7. 超参数调优不是魔法——它不能弥补糟糕的数据或错误的模型架构。

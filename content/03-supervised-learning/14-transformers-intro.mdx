@@ -1,0 +1,290 @@
+---
+title: "Transformer 原理：注意力机制与架构设计"
+description: "深入理解「Attention Is All You Need」的核心思想：自注意力、多头注意力、位置编码，以及 Transformer 的编码器-解码器架构。"
+part: "03-supervised-learning"
+order: 14
+difficulty: "advanced"
+estimatedMinutes: 45
+objectives:
+  - "理解自注意力机制的直觉与数学原理"
+  - "掌握 Query/Key/Value 框架与缩放点积注意力"
+  - "理解多头注意力、位置编码与层归一化"
+  - "对比 Transformer 与 RNN 的优劣"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra", "dnn-architecture", "rnn", "lstm-gru"]
+keywords: ["Transformer", "自注意力", "多头注意力", "位置编码", "Attention Is All You Need", "编码器-解码器"]
+---
+
+## 从 RNN 到 Attention：范式转变
+
+2017 年，Vaswani 等人在论文《Attention Is All You Need》中提出了 Transformer 架构，彻底改变了深度学习——尤其是自然语言处理的格局。
+
+RNN 的根本局限在于**串行计算**：每个时间步的计算依赖前一步的隐藏状态，无法并行；同时长距离依赖需要通过多个时间步传递梯度，容易衰减。Transformer 用**自注意力（Self-Attention）**机制一次性计算序列中所有位置之间的关联，实现了：
+
+1. **完全并行计算**——训练效率大幅提升
+2. **直接的远距离依赖**——任意两个位置之间的交互路径长度为 O(1)
+3. **可解释性**——注意力权重直观展示模型"关注"了哪些位置
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+import numpy as np
+
+# 直观理解：以"翻译"为例
+sentence_en = ["The", "cat", "sat", "on", "the", "mat"]
+sentence_zh = ["猫", "坐", "在", "垫子", "上"]
+
+print("英语 → 中文翻译中，每个输出词依赖输入的不同位置：")
+print("  '猫' 主要关注 'cat'")
+print("  '坐' 主要关注 'sat'")
+print("  '在...上' 关注 'on'")
+print("注意力机制让模型自动学习这种对齐关系")
+```
+
+## 自注意力（Self-Attention）的直觉
+
+自注意力的核心思想：**序列中的每个元素都会"关注"序列中的所有其他元素（包括自己）**，根据关注度加权聚合信息。
+
+对于输入序列 $X = [x_1, x_2, \ldots, x_n]$，每个位置计算三个向量：
+
+- **Query（查询）** $Q_i = X_i W_Q$：我在找什么？
+- **Key（键）** $K_i = X_i W_K$：我能提供什么？
+- **Value（值）** $V_i = X_i W_V$：我实际包含什么信息？
+
+位置 $i$ 对位置 $j$ 的注意力分数为 Query 和 Key 的点积：$\text{score}_{ij} = Q_i \cdot K_j^T$
+
+最终的输出是 Values 的加权和，权重由注意力分数通过 softmax 归一化得到。
+
+## 缩放点积注意力（Scaled Dot-Product Attention）
+
+将所有位置的 Q、K、V 堆叠为矩阵，一次计算全部注意力：
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\!\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+$$
+
+```python
+def scaled_dot_product_attention(Q, K, V, mask=None):
+    """
+    Q: (batch, ..., seq_len, d_k)    —— Query 矩阵
+    K: (batch, ..., seq_len, d_k)    —— Key 矩阵
+    V: (batch, ..., seq_len, d_v)    —— Value 矩阵
+    mask: (batch, ..., seq_len, seq_len) —— 注意力掩码
+
+    返回: (batch, ..., seq_len, d_v)
+    """
+    d_k = Q.size(-1)
+
+    # 计算注意力分数: Q @ K^T
+    scores = torch.matmul(Q, K.transpose(-2, -1))  # (..., seq_len, seq_len)
+
+    # 缩放：防止点积过大导致 softmax 梯度饱和
+    scores = scores / math.sqrt(d_k)
+
+    # 应用掩码（如因果掩码或 padding 掩码）
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+
+    # Softmax 归一化（沿 Key 维度）
+    attn_weights = F.softmax(scores, dim=-1)
+
+    # 加权聚合 Values
+    output = torch.matmul(attn_weights, V)  # (..., seq_len, d_v)
+
+    return output, attn_weights
+
+
+# 测试
+batch, seq_len, d_k, d_v = 2, 5, 64, 64
+Q = torch.randn(batch, seq_len, d_k)
+K = torch.randn(batch, seq_len, d_k)
+V = torch.randn(batch, seq_len, d_v)
+output, weights = scaled_dot_product_attention(Q, K, V)
+print("注意力输出形状:", output.shape)    # (2, 5, 64)
+print("注意力权重形状:", weights.shape)   # (2, 5, 5)
+# weights[i, j, k] 表示第 i 个样本中, 位置 j 对位置 k 的关注度
+```
+
+## 为什么要除以 sqrt(d_k)？
+
+当 $d_k$ 较大时，点积 $QK^T$ 的元素值近似服从均值为 0、方差为 $d_k$ 的分布。除以 $\sqrt{d_k}$ 将方差缩放回 1，使 softmax 输入落在梯度较大的区域（而非饱和区），避免梯度消失。
+
+```python
+# 实验验证
+d_k = 64
+q = torch.randn(1, 1000, d_k)
+k = torch.randn(1, 1000, d_k)
+scores_raw = (q @ k.transpose(-2, -1)).squeeze()
+scores_scaled = scores_raw / math.sqrt(d_k)
+
+print(f"不缩放: mean={scores_raw.mean():.2f}, std={scores_raw.std():.2f}")
+print(f"缩放后: mean={scores_scaled.mean():.2f}, std={scores_scaled.std():.2f}")
+
+# 不缩放时 softmax 会趋于 one-hot（梯度接近零）
+raw_softmax = F.softmax(scores_raw[0], dim=-1)
+scaled_softmax = F.softmax(scores_scaled[0], dim=-1)
+print(f"不缩放 softmax 熵: {-(raw_softmax * raw_softmax.log()).sum():.2f}")
+print(f"缩放后 softmax 熵: {-(scaled_softmax * scaled_softmax.log()).sum():.2f}")
+print("(熵越高 → 注意力分布越均匀 → 梯度越丰富)")
+```
+
+## 多头注意力（Multi-Head Attention）
+
+单一注意力头只能关注一种关系模式。多头注意力运行多个独立的注意力"头"，每个头将 Q、K、V 投影到不同的子空间，捕捉不同类型的关系：
+
+$$
+\text{MultiHead}(Q, K, V) = \text{Concat}(\text{head}_1, \ldots, \text{head}_h) W_O
+$$
+
+$$
+\text{head}_i = \text{Attention}(Q W_Q^i, K W_K^i, V W_V^i)
+$$
+
+```python
+class MultiHeadAttention(nn.Module):
+    """从零实现多头注意力"""
+    def __init__(self, d_model, num_heads, dropout=0.1):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model 必须能被 num_heads 整除"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+
+        # Q, K, V 的线性投影
+        self.W_Q = nn.Linear(d_model, d_model)
+        self.W_K = nn.Linear(d_model, d_model)
+        self.W_V = nn.Linear(d_model, d_model)
+        self.W_O = nn.Linear(d_model, d_model)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, Q, K, V, mask=None):
+        batch_size = Q.size(0)
+
+        # 线性投影并拆分为多个头
+        # 形状: (batch, seq_len, num_heads, d_k) → (batch, num_heads, seq_len, d_k)
+        Q = self.W_Q(Q).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        K = self.W_K(K).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+        V = self.W_V(V).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
+
+        # 每个头独立计算注意力
+        attn_output, _ = scaled_dot_product_attention(Q, K, V, mask)
+        # attn_output: (batch, num_heads, seq_len, d_k)
+
+        # 合并所有头
+        attn_output = attn_output.transpose(1, 2).contiguous()  # (batch, seq_len, num_heads, d_k)
+        attn_output = attn_output.view(batch_size, -1, self.d_model)  # (batch, seq_len, d_model)
+
+        output = self.W_O(attn_output)
+        return output
+
+
+mha = MultiHeadAttention(d_model=512, num_heads=8)
+x = torch.randn(2, 10, 512)
+out = mha(x, x, x)  # 自注意力：Q, K, V 都来自同一输入
+print("多头注意力输出形状:", out.shape)  # (2, 10, 512)
+```
+
+不同注意力头可以学习不同的关系模式：有的头关注相邻词（局部语法），有的关注远距离的主语-谓语关系，有的关注共指关系等。
+
+## 位置编码（Positional Encoding）
+
+自注意力本身是**置换不变**的——它完全不关心输入的顺序。位置编码将位置信息注入模型，使 Transformer 能够区分"猫追狗"和"狗追猫"。
+
+**正弦位置编码**（原始论文方法）：
+
+$$
+PE_{(pos, 2i)} = \sin\!\left(\frac{pos}{10000^{2i / d_{model}}}\right)
+$$
+
+$$
+PE_{(pos, 2i+1)} = \cos\!\left(\frac{pos}{10000^{2i / d_{model}}}\right)
+$$
+
+```python
+class SinusoidalPositionalEncoding(nn.Module):
+    """正弦位置编码"""
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        # 除数: 10000^(2i/d_model) —— 不同维度有不同的频率
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float()
+            * (-math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)   # 偶数维度用 sin
+        pe[:, 1::2] = torch.cos(position * div_term)   # 奇数维度用 cos
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x: (batch, seq_len, d_model)
+        return x + self.pe[:, :x.size(1)]
+
+# 可视化位置编码
+pe = SinusoidalPositionalEncoding(d_model=128, max_len=100)
+print("位置编码形状:", pe.pe.shape)  # (1, 100, 128)
+print("不同维度有不同的波长，使模型能区分绝对和相对位置")
+
+# 重要性：正弦编码使得模型容易学习相对位置
+# PE(pos + k) 可以表示为 PE(pos) 的线性函数
+```
+
+## 层归一化与残差连接
+
+Transformer 中每个子层（注意力层、前馈层）都采用了**残差连接 + 层归一化**的结构：
+
+$$\text{Output} = \text{LayerNorm}(x + \text{Sublayer}(x))$$
+
+```python
+class SublayerConnection(nn.Module):
+    """Transformer 子层的包装：残差连接 + 层归一化"""
+    def __init__(self, d_model, dropout=0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, sublayer):
+        # 先归一化再计算子层（Pre-LN 风格，训练更稳定）
+        return x + self.dropout(sublayer(self.norm(x)))
+```
+
+**为什么用 LayerNorm 而非 BatchNorm？** 在 NLP 任务中，序列长度可变、批次内不同样本的统计量不稳定。LayerNorm 对每个样本独立计算均值和方差，不受批次大小和序列长度影响。
+
+## 编码器-解码器架构
+
+原始 Transformer 采用编码器-解码器结构：
+
+- **编码器（Encoder）**：$N$ 个相同的层堆叠，每层包含多头自注意力 + 前馈网络。编码器将输入序列 $X$ 映射为上下文表示。
+- **解码器（Decoder）**：$N$ 个相同的层堆叠，每层包含掩码多头自注意力、交叉注意力（关注编码器输出）+ 前馈网络。
+
+**交叉注意力（Cross-Attention）** 是解码器与编码器之间的桥梁：解码器的 Query 来自前一层的输出，Key 和 Value 来自编码器的最终输出。这使得解码器在生成每个 token 时都能"看到"编码器的完整表示。
+
+```python
+class FeedForward(nn.Module):
+    """Transformer 中的前馈网络（位置独立）"""
+    def __init__(self, d_model, d_ff, dropout=0.1):
+        super().__init__()
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        return self.linear2(self.dropout(F.relu(self.linear1(x))))
+```
+
+## Transformer vs RNN：全面对比
+
+| 维度 | RNN / LSTM / GRU | Transformer |
+|------|-----------------|-------------|
+| 计算方式 | 串行（逐时间步） | 并行（矩阵乘法） |
+| 训练速度 | 慢 | 快（数十倍加速） |
+| 长距离依赖 | 需要 $O(n)$ 步梯度传播 | 直接连接，$O(1)$ 步 |
+| 序列长度限制 | 梯度消失限制有效长度 | 自注意力的 $O(n^2)$ 复杂度限制 |
+| 参数量 | 较少 | 较多 |
+| 可解释性 | 差 | 较好（注意力权重） |
+| 最佳适用场景 | 流式/低延迟推理、极长序列 | 需要全局上下文的 NLP/CV 任务 |
+
+**当前趋势**：Transformer 已成为 NLP 的主流架构（BERT、GPT 系列均基于它），并在视觉（ViT）、语音、强化学习等领域迅速扩展。但 RNN/LSTM 在资源受限、流式处理、在线学习等特定场景仍有优势。

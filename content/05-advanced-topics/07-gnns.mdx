@@ -1,0 +1,519 @@
+---
+title: "图神经网络 (GNN)：在图结构数据上学习"
+description: "从消息传递框架到 GCN、GraphSAGE、GAT，使用 PyTorch Geometric 实现节点分类"
+part: "05-advanced-topics"
+order: 7
+difficulty: "advanced"
+estimatedMinutes: 40
+objectives:
+  - "理解图结构数据：节点、边、邻接矩阵、特征矩阵"
+  - "掌握消息传递框架：聚合邻居信息 → 更新节点表示"
+  - "理解 GCN 的谱域卷积公式和逐层传播规则"
+  - "掌握 GraphSAGE 和 GAT 的核心思想"
+  - "使用 PyTorch Geometric 在 Cora 数据集上实现节点分类"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra"]
+keywords: ["GNN", "GCN", "GraphSAGE", "GAT", "message-passing", "node-classification", "PyG"]
+---
+
+# 一、图结构数据
+
+现实世界中，许多数据天然具有图结构——实体之间存在复杂的关系连接：
+
+- **社交网络**：节点 = 用户，边 = 好友关系
+- **分子结构**：节点 = 原子，边 = 化学键
+- **引文网络**：节点 = 论文，边 = 引用关系
+- **知识图谱**：节点 = 实体，边 = 关系
+- **推荐系统**：节点 = 用户/商品，边 = 交互行为
+
+数学上，一个图 $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ 由节点集合 $\mathcal{V} = \{v_1, v_2, \ldots, v_N\}$ 和边集合 $\mathcal{E} \subseteq \mathcal{V} \times \mathcal{V}$ 组成。通常用以下数据结构表示：
+
+- **邻接矩阵** $\mathbf{A} \in \{0, 1\}^{N \times N}$：$A_{ij} = 1$ 表示节点 $i$ 和 $j$ 之间有边
+- **节点特征矩阵** $\mathbf{X} \in \mathbb{R}^{N \times F}$：每行是一个节点的 $F$ 维特征
+- **边特征**（可选）：每条边附带的属性信息
+
+```python
+import torch
+import numpy as np
+
+# ---- 手动构建一个简单的图 ----
+# 5 个节点，4 条无向边
+#    0 --- 1
+#    |     |
+#    2 --- 3    4 (孤立节点)
+
+N = 5  # 节点数
+edges = [(0,1), (0,2), (1,3), (2,3)]  # 边列表
+
+# 邻接矩阵（无向图 → 对称矩阵）
+adj = torch.zeros(N, N)
+for src, dst in edges:
+    adj[src, dst] = 1
+    adj[dst, src] = 1  # 无向边
+
+print("邻接矩阵 A:")
+print(adj)
+
+# 节点特征（5 个节点，每个 3 维特征）
+X = torch.tensor([
+    [1.0, 0.0, 0.5],
+    [0.5, 1.0, 0.0],
+    [0.0, 0.5, 1.0],
+    [1.0, 0.5, 0.0],
+    [0.0, 1.0, 0.5],
+])
+
+# 度矩阵 D（对角矩阵，D_{ii} = 节点 i 的度）
+D = torch.diag(adj.sum(dim=1))
+print("\n度矩阵 D:")
+print(D)
+```
+
+# 二、消息传递框架
+
+图神经网络的核心思想是**消息传递（Message Passing）**：每个节点通过聚合其邻居的信息来更新自身的表示。
+
+消息传递框架可以分为两步：
+
+1. **聚合（Aggregate）**：收集邻居节点的消息
+2. **更新（Update）**：结合自身信息和聚合来的邻居信息
+
+形式化表示：
+
+$$
+\mathbf{h}_v^{(k+1)} = \text{UPDATE}\!\left( \mathbf{h}_v^{(k)}, \;\; \text{AGGREGATE}\!\left( \left\{ \mathbf{h}_u^{(k)} : u \in \mathcal{N}(v) \right\} \right) \right)
+$$
+
+其中 $\mathbf{h}_v^{(k)}$ 是节点 $v$ 在第 $k$ 层的表示，$\mathcal{N}(v)$ 是节点 $v$ 的邻居集合。
+
+```python
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MessagePassingLayer(nn.Module):
+    """手动实现一个简单的消息传递层（说明性代码）"""
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear_self = nn.Linear(in_dim, out_dim)    # 自身变换
+        self.linear_neigh = nn.Linear(in_dim, out_dim)   # 邻居变换
+
+    def forward(self, x, adj):
+        """
+        x: (N, in_dim) 节点特征
+        adj: (N, N) 邻接矩阵
+        """
+        # 1. 消息传递：对每个节点收集邻居信息
+        # adj @ x 的效果：节点 i 的新特征 = sum_{j in N(i)} x_j
+        neighbor_msg = torch.matmul(adj, x)  # (N, in_dim)
+
+        # 2. 自身特征和邻居特征的线性变换
+        self_transform = self.linear_self(x)              # (N, out_dim)
+        neigh_transform = self.linear_neigh(neighbor_msg) # (N, out_dim)
+
+        # 3. 更新：合并自身和邻居信息
+        h_new = F.relu(self_transform + neigh_transform)
+
+        return h_new
+
+# 测试
+msg_layer = MessagePassingLayer(in_dim=3, out_dim=8)
+h_updated = msg_layer(X, adj)
+print(f"消息传递后节点表示: {h_updated.shape}")  # (5, 8)
+```
+
+# 三、图卷积网络 (GCN)
+
+GCN 是最经典的图神经网络。它的逐层传播规则为：
+
+$$
+\mathbf{H}^{(l+1)} = \sigma\!\left( \tilde{\mathbf{D}}^{-\frac{1}{2}} \tilde{\mathbf{A}} \tilde{\mathbf{D}}^{-\frac{1}{2}} \mathbf{H}^{(l)} \mathbf{W}^{(l)} \right)
+$$
+
+其中：
+- $\tilde{\mathbf{A}} = \mathbf{A} + \mathbf{I}$：添加自环（self-loop）的邻接矩阵
+- $\tilde{\mathbf{D}}_{ii} = \sum_j \tilde{\mathbf{A}}_{ij}$：对应的度矩阵
+- $\tilde{\mathbf{D}}^{-\frac{1}{2}} \tilde{\mathbf{A}} \tilde{\mathbf{D}}^{-\frac{1}{2}}$：对称归一化的邻接矩阵
+- $\mathbf{W}^{(l)}$：可训练的权重矩阵
+- $\sigma$：非线性激活函数（如 ReLU）
+
+归一化的作用：如果不归一化，高度节点会累积非常大的特征值。对称归一化后，每行（每列）的信息被节点的度数平衡。
+
+```python
+class GCNLayer(nn.Module):
+    """单层图卷积网络"""
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(in_dim, out_dim) * 0.02)
+        self.bias = nn.Parameter(torch.zeros(out_dim))
+
+    def forward(self, x, adj):
+        """
+        x: (N, in_dim)
+        adj: (N, N) 邻接矩阵（包含自环）
+        """
+        # 计算归一化邻接矩阵
+        # D^{-1/2} * A * D^{-1/2}
+        deg = adj.sum(dim=1)  # 度
+        deg_inv_sqrt = torch.pow(deg, -0.5)
+        deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0.0
+
+        # 归一化邻接矩阵
+        D_inv_sqrt = torch.diag(deg_inv_sqrt)
+        norm_adj = D_inv_sqrt @ adj @ D_inv_sqrt
+
+        # 图卷积
+        support = x @ self.weight              # (N, out_dim) 特征变换
+        output = norm_adj @ support             # (N, out_dim) 邻居聚合
+        output = output + self.bias
+        return output
+
+
+class GCN(nn.Module):
+    """两层 GCN 模型"""
+    def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.5):
+        super().__init__()
+        self.conv1 = GCNLayer(in_dim, hidden_dim)
+        self.conv2 = GCNLayer(hidden_dim, out_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, adj):
+        # 第一层：特征变换 + 聚合 + ReLU
+        x = self.conv1(x, adj)
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        # 第二层：输出分类 logits
+        x = self.conv2(x, adj)
+        return x  # (N, num_classes)
+
+
+# 测试
+gcn = GCN(in_dim=3, hidden_dim=16, out_dim=2)
+logits = gcn(X, adj + torch.eye(N))  # 添加自环
+print(f"GCN 输出形状: {logits.shape}")  # (5, 2)
+```
+
+# 四、GraphSAGE：归纳式图学习
+
+GCN 的一个局限是**直推式（transductive）**——它只能对训练时见过的节点做预测。GraphSAGE 通过**采样邻居**并进行聚合，实现了**归纳式（inductive）**学习，可以泛化到未见过的节点。
+
+GraphSAGE 的核心操作：对每个节点采样固定数量的邻居，然后用一个可微的聚合函数（均值、LSTM 或池化）来合并邻居信息：
+
+```python
+class GraphSAGELayer(nn.Module):
+    """GraphSAGE 层（均值聚合器）"""
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(in_dim * 2, out_dim)  # 拼接自身和邻居
+
+    def forward(self, x, adj):
+        """
+        x: (N, in_dim)
+        adj: (N, N) 邻接矩阵
+        """
+        # 归一化邻接矩阵用于均值聚合
+        deg = adj.sum(dim=1, keepdim=True).clamp(min=1)
+        norm_adj = adj / deg  # 每行除以度，实现均值
+
+        # 邻居均值聚合
+        neigh_mean = norm_adj @ x  # (N, in_dim)
+
+        # 拼接自身特征和邻居均值
+        h = torch.cat([x, neigh_mean], dim=-1)  # (N, 2*in_dim)
+        h = self.linear(h)
+        h = F.relu(h)
+
+        # 归一化（GraphSAGE 论文中使用 L2 归一化）
+        h = F.normalize(h, p=2, dim=-1)
+        return h
+
+
+class GraphSAGE(nn.Module):
+    """两层 GraphSAGE"""
+    def __init__(self, in_dim, hidden_dim, out_dim):
+        super().__init__()
+        self.sage1 = GraphSAGELayer(in_dim, hidden_dim)
+        self.sage2 = GraphSAGELayer(hidden_dim, out_dim)
+
+    def forward(self, x, adj):
+        x = self.sage1(x, adj)
+        x = self.sage2(x, adj)
+        return x
+```
+
+# 五、图注意力网络 (GAT)
+
+GAT 在消息聚合时引入**注意力机制**——不是所有邻居都同等重要，有些邻居可能包含更多相关信息：
+
+$$
+\mathbf{h}_i' = \sigma\!\left( \sum_{j \in \mathcal{N}(i)} \alpha_{ij} \mathbf{W} \mathbf{h}_j \right)
+$$
+
+注意力系数 $\alpha_{ij}$ 计算如下：
+
+$$
+\alpha_{ij} = \frac{\exp\left( \text{LeakyReLU}\left( \mathbf{a}^T [\mathbf{W}\mathbf{h}_i \parallel \mathbf{W}\mathbf{h}_j] \right) \right)}
+                  {\sum_{k \in \mathcal{N}(i)} \exp\left( \text{LeakyReLU}\left( \mathbf{a}^T [\mathbf{W}\mathbf{h}_i \parallel \mathbf{W}\mathbf{h}_k] \right) \right)}
+$$
+
+其中 $\mathbf{a}$ 是可学习的注意力向量，$\parallel$ 表示拼接。
+
+```python
+class GATLayer(nn.Module):
+    """单头图注意力层"""
+    def __init__(self, in_dim, out_dim, dropout=0.1, alpha=0.2):
+        super().__init__()
+        self.W = nn.Linear(in_dim, out_dim, bias=False)  # 特征变换
+        self.a = nn.Parameter(torch.randn(2 * out_dim, 1))  # 注意力向量
+        self.dropout = nn.Dropout(dropout)
+        self.leaky_relu = nn.LeakyReLU(alpha)
+
+    def forward(self, x, adj):
+        """
+        x: (N, in_dim)
+        adj: (N, N) 邻接矩阵（非零 = 有边）
+        """
+        N = x.size(0)
+        h = self.W(x)  # (N, out_dim)
+
+        # 计算所有节点对的注意力分数
+        # 拼接 [Wh_i || Wh_j] 对于所有 i,j
+        h_i = h.unsqueeze(1).repeat(1, N, 1)  # (N, N, out_dim)
+        h_j = h.unsqueeze(0).repeat(N, 1, 1)  # (N, N, out_dim)
+        h_cat = torch.cat([h_i, h_j], dim=-1)  # (N, N, 2*out_dim)
+
+        # 原始注意力分数
+        e = self.leaky_relu(h_cat @ self.a).squeeze(-1)  # (N, N)
+
+        # 只保留有边的位置的注意力分数
+        attention = e.masked_fill(adj == 0, float('-inf'))
+
+        # Softmax 归一化
+        attention = F.softmax(attention, dim=-1)
+        attention = self.dropout(attention)
+
+        # 加权聚合邻居
+        h_prime = attention @ h  # (N, out_dim)
+        return F.elu(h_prime)
+```
+
+# 六、PyTorch Geometric (PyG) 实战
+
+PyG 是图神经网络最流行的库，提供了高效的消息传递实现和大量经典数据集：
+
+```python
+# 确保安装: pip install torch-geometric
+import torch
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, SAGEConv, GATConv
+from torch_geometric.datasets import Planetoid
+import torch_geometric.transforms as T
+
+# ---- 加载 Cora 引文网络数据集 ----
+# Cora: 2708 篇论文，7 个类别，1433 维词袋特征
+dataset = Planetoid(
+    root='./data/Cora',
+    name='Cora',
+    transform=T.NormalizeFeatures()  # 特征归一化
+)
+
+data = dataset[0]  # 取第一个（也是唯一的）图
+
+print(f"数据集: {dataset.name}")
+print(f"节点数: {data.num_nodes}")
+print(f"边数: {data.num_edges}")
+print(f"特征维度: {dataset.num_features}")
+print(f"类别数: {dataset.num_classes}")
+print(f"训练节点数: {data.train_mask.sum().item()}")
+print(f"验证节点数: {data.val_mask.sum().item()}")
+print(f"测试节点数: {data.test_mask.sum().item()}")
+```
+
+```python
+# ---- 使用 PyG 构建 GCN ----
+class GCN_PyG(torch.nn.Module):
+    """两层的 GCN"""
+    def __init__(self, in_channels, hidden_channels, out_channels, dropout=0.5):
+        super().__init__()
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+        self.conv2 = GCNConv(hidden_channels, out_channels)
+        self.dropout = dropout
+
+    def forward(self, x, edge_index):
+        # x: (N, F), edge_index: (2, E)
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.conv2(x, edge_index)
+        return x
+
+
+# ---- 训练与评估 ----
+def train_gnn(model, data, optimizer, criterion):
+    model.train()
+    optimizer.zero_grad()
+
+    out = model(data.x, data.edge_index)        # 前向传播
+    loss = criterion(out[data.train_mask], data.y[data.train_mask])
+    loss.backward()
+    optimizer.step()
+
+    return loss.item()
+
+
+@torch.no_grad()
+def evaluate_gnn(model, data):
+    model.eval()
+    out = model(data.x, data.edge_index)
+    pred = out.argmax(dim=1)
+
+    accs = {}
+    for split, mask in [('train', data.train_mask),
+                         ('val', data.val_mask),
+                         ('test', data.test_mask)]:
+        correct = pred[mask].eq(data.y[mask]).sum().item()
+        accs[split] = correct / mask.sum().item()
+
+    return accs
+
+
+# ---- 主训练循环 ----
+def run_gnn_training(model_class=GCN_PyG, hidden_channels=16, epochs=200, lr=0.01):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    model = model_class(
+        dataset.num_features, hidden_channels, dataset.num_classes
+    ).to(device)
+
+    data_device = data.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=5e-4)
+    criterion = torch.nn.CrossEntropyLoss()
+
+    best_val_acc = 0
+    best_test_acc = 0
+
+    for epoch in range(1, epochs + 1):
+        loss = train_gnn(model, data_device, optimizer, criterion)
+        accs = evaluate_gnn(model, data_device)
+
+        if accs['val'] > best_val_acc:
+            best_val_acc = accs['val']
+            best_test_acc = accs['test']
+
+        if epoch % 20 == 0:
+            print(f"Epoch {epoch:3d} | Loss: {loss:.4f} | "
+                  f"Train: {accs['train']:.4f} | Val: {accs['val']:.4f} | "
+                  f"Test: {accs['test']:.4f}")
+
+    print(f"\n最佳验证准确率: {best_val_acc:.4f}, 对应测试准确率: {best_test_acc:.4f}")
+    return model, best_test_acc
+
+# 运行训练
+# model, test_acc = run_gnn_training(GCN_PyG, epochs=200)
+print("GCN (PyG) 训练代码就绪")
+```
+
+```python
+# ---- 对比不同 GNN 架构 ----
+class GAT_PyG(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, heads=8, dropout=0.5):
+        super().__init__()
+        # 第一层：多头注意力，每个头输出 hidden_channels // heads 维
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout)
+        # 第二层：单头注意力用于分类
+        self.conv2 = GATConv(hidden_channels * heads, out_channels, heads=1,
+                             concat=False, dropout=dropout)
+        self.dropout = dropout
+
+    def forward(self, x, edge_index):
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.conv1(x, edge_index)
+        x = F.elu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.conv2(x, edge_index)
+        return x
+
+
+class GraphSAGE_PyG(torch.nn.Module):
+    def __init__(self, in_channels, hidden_channels, out_channels, dropout=0.5):
+        super().__init__()
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+        self.conv2 = SAGEConv(hidden_channels, out_channels)
+        self.dropout = dropout
+
+    def forward(self, x, edge_index):
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        x = self.conv2(x, edge_index)
+        return x
+
+
+print("\n不同架构对比（Cora 数据集）:")
+print("-" * 50)
+for name, model_cls in [("GCN", GCN_PyG), ("GAT", GAT_PyG), ("GraphSAGE", GraphSAGE_PyG)]:
+    # _, test_acc = run_gnn_training(model_cls, epochs=200)
+    # print(f"{name:12s}: 测试准确率 = {test_acc:.4f}")
+    print(f"  {name:12s}: (取消注释以运行)")
+```
+
+# 七、GNN 的应用场景
+
+| 应用 | 任务类型 | 典型数据集 | 方法 |
+|------|---------|----------|------|
+| 社交网络分析 | 节点分类 | Reddit, GitHub | GraphSAGE |
+| 分子性质预测 | 图回归 | QM9, ZINC | GIN, GAT |
+| 推荐系统 | 链接预测 | MovieLens, Amazon | PinSAGE, LightGCN |
+| 交通预测 | 时空预测 | METR-LA, PEMS | STGCN, DCRNN |
+| 蛋白质结构 | 结构预测 | AlphaFold DB | Equivariant GNN |
+
+# 八、大规模图的挑战
+
+GNN 在处理大规模图时面临独特挑战：
+
+1. **邻居爆炸（Neighbor Explosion）**：随着层数增加，每个节点的感受野呈指数增长。3 层 GCN 后一个节点可能涉及数千个邻居。采样策略（如 GraphSAGE）是关键解决方案。
+
+2. **全批量训练的不可行**：大型图（数百万节点）无法一次性载入 GPU。需要使用 mini-batch 训练和邻居采样。
+
+3. **过平滑（Over-smoothing）**：堆叠过多层后，所有节点的表示趋于相同，丧失区分能力。这是 GNN 通常很浅（2~4 层）的原因。
+
+```python
+# 演示过平滑效应
+def analyze_over_smoothing(num_layers=10):
+    """模拟多层消息传递后的节点表示相似度"""
+    N = 100
+    x = torch.randn(N, 16)  # 随机初始特征
+    # 随机图
+    adj = torch.randint(0, 2, (N, N)).float()
+    adj = (adj + adj.T) / 2  # 对称化
+    adj = adj + torch.eye(N)  # 添加自环
+
+    similarities = []
+    for layer in range(num_layers):
+        # 归一化邻接矩阵
+        deg_inv = torch.diag(torch.pow(adj.sum(dim=1), -0.5))
+        norm_adj = deg_inv @ adj @ deg_inv
+        x = norm_adj @ x  # 消息传递
+
+        # 计算节点对之间的平均余弦相似度
+        x_norm = F.normalize(x, dim=-1)
+        sim = (x_norm @ x_norm.T).mean().item()
+        similarities.append(sim)
+
+        print(f"层 {layer+1:2d}: 平均节点相似度 = {sim:.4f}")
+
+    # 理想情况下，相似度不应趋近于 1.0（那意味所有节点表示相同）
+
+# analyze_over_smoothing()
+print("过平滑分析代码就绪")
+```
+
+## 总结
+
+| 方法 | 聚合方式 | 可学习参数 | 特点 |
+|------|---------|----------|------|
+| GCN | 对称归一化加权和 | W（特征变换） | 直推式，计算高效 |
+| GraphSAGE | 均值/LSTM/池化 | W（拼接后变换） | 归纳式，支持采样 |
+| GAT | 注意力加权和 | W, a（注意力） | 动态权重，表达能力强 |
+| GIN | $\sum + (1+\epsilon) \cdot$ 自身 | W, $\epsilon$ | 理论上最强的表达能力 |
+
+图神经网络将深度学习的威力扩展到非欧几里得数据结构上。理解消息传递框架是进入这一领域的钥匙——所有 GNN 变体本质上都是在"如何聚合邻居信息"和"如何更新自身表示"这两个问题上做文章。掌握 GCN、GraphSAGE 和 GAT 这三种经典架构，就能应对大多数图学习任务。

@@ -1,0 +1,242 @@
+---
+title: "线性回归：理论与推导"
+description: "从零理解线性回归的数学模型、损失函数、闭式解、假设条件与诊断方法"
+part: "03-supervised-learning"
+order: 1
+difficulty: "beginner"
+estimatedMinutes: 35
+objectives:
+  - "理解线性回归的假设函数和向量形式"
+  - "推导均方误差(MSE)损失函数及其性质"
+  - "掌握正规方程的闭式解及几何意义"
+  - "了解R-squared和残差诊断"
+  - "识别线性回归的假设条件和适用边界"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra"]
+keywords: ["linear-regression", "mse", "normal-equation", "r-squared", "residual-analysis"]
+---
+
+# 一、什么是线性回归
+
+线性回归（Linear Regression）是有监督学习中最基础也最重要的模型之一。它的目标是找到一条直线（或超平面），使得预测值与真实值之间的误差最小。
+
+给定训练数据集 $\{(\mathbf{x}^{(1)}, y^{(1)}), (\mathbf{x}^{(2)}, y^{(2)}), \ldots, (\mathbf{x}^{(n)}, y^{(n)})\}$，其中 $\mathbf{x}^{(i)} \in \mathbb{R}^d$ 是 $d$ 维特征向量，$y^{(i)} \in \mathbb{R}$ 是连续的标签值。
+
+## 假设函数
+
+对于单个样本，最简单的形式是一条直线：
+
+$$\hat{y} = wx + b$$
+
+其中 $w$ 是权重（斜率），$b$ 是偏置（截距）。对于多维特征，假设函数推广为向量形式：
+
+$$\hat{y} = \mathbf{w}^T\mathbf{x} + b$$
+
+将所有样本写成矩阵形式。设特征矩阵 $\mathbf{X} \in \mathbb{R}^{n \times d}$，权重向量 $\mathbf{W} \in \mathbb{R}^d$，偏置 $b \in \mathbb{R}$，则：
+
+$$\hat{\mathbf{y}} = \mathbf{X}\mathbf{W} + b \cdot \mathbf{1}$$
+
+为了方便，通常将偏置项 $b$ 吸收进权重向量中：在 $\mathbf{X}$ 的左侧（或右侧）添加一列全 1，将 $\mathbf{W}$ 扩展为 $(d+1)$ 维向量 $\mathbf{W} = [b, w_1, w_2, \ldots, w_d]^T$（或 $\mathbf{W} = [w_1, \ldots, w_d, b]^T$，取决于 1 放在哪一列）。此时：
+
+$$\hat{\mathbf{y}} = \mathbf{X}\mathbf{W}$$
+
+其中 $\mathbf{X}$ 的形状为 $n \times (d+1)$，$\mathbf{W}$ 的形状为 $(d+1) \times 1$。
+
+# 二、损失函数：均方误差（MSE）
+
+损失函数用于度量模型预测值与真实值之间的差距。线性回归最常用的损失函数是**均方误差（Mean Squared Error, MSE）**：
+
+$$\mathcal{L}(\mathbf{W}) = \frac{1}{n} \sum_{i=1}^{n} (\hat{y}^{(i)} - y^{(i)})^2 = \frac{1}{n} \|\mathbf{X}\mathbf{W} - \mathbf{y}\|_2^2$$
+
+## 为什么要用平方误差？
+
+1. **可导性**：平方函数是光滑的，处处可导，适合基于梯度的优化方法。
+2. **凸性**：MSE 关于 $\mathbf{W}$ 是凸函数，任何局部极小值都是全局极小值。
+3. **统计学基础**：如果误差服从均值为零的正态分布（高斯噪声假设），则最小化 MSE 等价于**最大似然估计（MLE）**。
+
+设 $y = \mathbf{x}^T\mathbf{W} + \varepsilon$，其中 $\varepsilon \sim \mathcal{N}(0, \sigma^2)$，则似然函数为：
+
+$$L(\mathbf{W}) = \prod_{i=1}^{n} \frac{1}{\sqrt{2\pi\sigma^2}} \exp\left(-\frac{(y^{(i)} - \mathbf{x}^{(i)T}\mathbf{W})^2}{2\sigma^2}\right)$$
+
+取负对数似然后，最大化似然等价于最小化 $\sum (y^{(i)} - \mathbf{x}^{(i)T}\mathbf{W})^2$，即 MSE。
+
+# 三、正规方程（Normal Equation）
+
+因为 MSE 是凸函数，我们可以直接对 $\mathbf{W}$ 求导并令其为零，得到闭式解（Closed-form Solution）。
+
+## 推导
+
+将损失函数展开：
+
+$$\mathcal{L}(\mathbf{W}) = \frac{1}{n} (\mathbf{X}\mathbf{W} - \mathbf{y})^T (\mathbf{X}\mathbf{W} - \mathbf{y})$$
+
+对 $\mathbf{W}$ 求梯度并设为零：
+
+$$\nabla_{\mathbf{W}} \mathcal{L} = \frac{2}{n} \mathbf{X}^T (\mathbf{X}\mathbf{W} - \mathbf{y}) = 0$$
+
+从而得到**正规方程**：
+
+$$\mathbf{X}^T \mathbf{X} \mathbf{W} = \mathbf{X}^T \mathbf{y}$$
+
+当 $\mathbf{X}^T\mathbf{X}$ 可逆时：
+
+$$\mathbf{W}^* = (\mathbf{X}^T \mathbf{X})^{-1} \mathbf{X}^T \mathbf{y}$$
+
+## 数值稳定性
+
+在实际计算中，直接求 $\mathbf{X}^T\mathbf{X}$ 的逆可能存在数值稳定性问题。更好的做法是使用 **QR 分解**或**奇异值分解（SVD）**来求解。在代码中，我们通常使用 `np.linalg.lstsq` 或 `np.linalg.solve`：
+
+```python
+import numpy as np
+
+def normal_equation(X, y):
+    """
+    X: (n, d) 特征矩阵（已包含偏置项的全1列）
+    y: (n,) 或 (n, 1) 标签
+    """
+    # 方法1：直接求解，避免显式求逆
+    W = np.linalg.solve(X.T @ X, X.T @ y)
+
+    # 方法2：使用 lstsq（更稳定）
+    # W, residuals, rank, s = np.linalg.lstsq(X, y, rcond=None)
+
+    return W
+
+# 示例
+np.random.seed(42)
+n, d = 100, 3
+X = np.random.randn(n, d)
+X = np.hstack([np.ones((n, 1)), X])  # 添加偏置列
+true_W = np.array([2.0, -1.5, 3.0, 0.5])
+y = X @ true_W + 0.1 * np.random.randn(n)
+
+W_hat = normal_equation(X, y)
+print("真实权重:", true_W)
+print("估计权重:", W_hat)
+```
+
+## 计算复杂度
+
+- 构建 $\mathbf{X}^T\mathbf{X}$：$\mathcal{O}(n d^2)$
+- 求解线性系统：$\mathcal{O}(d^3)$
+
+当特征维度 $d$ 很大时（如 $d > 10^4$），正规方程的代价极高，此时应使用梯度下降类的迭代方法。
+
+# 四、几何解释
+
+从线性代数的视角，线性回归的解是 $\mathbf{y}$ 在 $\mathbf{X}$ 的列空间上的**正交投影**。
+
+$\mathbf{X}\mathbf{W}$ 是 $\mathbf{X}$ 的列向量的线性组合，构成 $\mathbf{X}$ 的列空间 $\text{Col}(\mathbf{X})$。而残差向量 $\mathbf{r} = \mathbf{y} - \mathbf{X}\mathbf{W}$ 与列空间正交：
+
+$$\mathbf{X}^T (\mathbf{y} - \mathbf{X}\mathbf{W}) = 0$$
+
+这意味着 $\mathbf{X}\mathbf{W}$ 是 $\mathbf{y}$ 在 $\text{Col}(\mathbf{X})$ 上的正交投影。投影矩阵为：
+
+$$\mathbf{P} = \mathbf{X} (\mathbf{X}^T \mathbf{X})^{-1} \mathbf{X}^T$$
+
+$$\hat{\mathbf{y}} = \mathbf{P} \mathbf{y}$$
+
+矩阵 $\mathbf{P}$ 满足 $\mathbf{P}^2 = \mathbf{P}$（幂等性）和 $\mathbf{P}^T = \mathbf{P}$（对称性），这正是投影矩阵的特征。
+
+# 五、R-squared：决定系数
+
+$R^2$（决定系数）衡量模型解释了目标变量方差的比例：
+
+$$R^2 = 1 - \frac{\sum_{i=1}^{n} (y^{(i)} - \hat{y}^{(i)})^2}{\sum_{i=1}^{n} (y^{(i)} - \bar{y})^2} = 1 - \frac{\text{SS}_{\text{res}}}{\text{SS}_{\text{tot}}}$$
+
+其中 $\bar{y} = \frac{1}{n}\sum_{i} y^{(i)}$ 是均值，$\text{SS}_{\text{res}}$ 是残差平方和，$\text{SS}_{\text{tot}}$ 是总平方和。
+
+- $R^2 = 1$：模型完美拟合数据。
+- $R^2 = 0$：模型不比用均值预测更好。
+- $R^2 < 0$：模型比用均值预测还差（可能出现在不含截距项的回归中）。
+
+**注意**：$R^2$ 随着特征增加而单调不减（即使新增特征是噪声）。因此我们常用**调整 $R^2$（Adjusted $R^2$）**：
+
+$$R^2_{\text{adj}} = 1 - \frac{(1 - R^2)(n - 1)}{n - d - 1}$$
+
+# 六、残差分析与模型诊断
+
+残差 $r^{(i)} = y^{(i)} - \hat{y}^{(i)}$ 是诊断模型是否满足假设的重要工具。
+
+## 残差图（Residual Plot）
+
+绘制残差 vs 预测值（或残差 vs 特征）可以暴露：
+
+1. **非线性的模式**：残差呈现曲线形状，说明数据中存在非线性关系，需要添加多项式特征或使用非线性模型。
+2. **异方差性**：残差的方差随预测值增大而系统变化（喇叭形），违反了同方差假设。解决方法包括对数变换、加权最小二乘。
+3. **异常值**：某些点的残差远大于其他点，可能是异常值或录入错误。
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_residuals(y_true, y_pred):
+    residuals = y_true - y_pred
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    # 1. 残差 vs 预测值
+    axes[0].scatter(y_pred, residuals, alpha=0.6, edgecolors='k', linewidth=0.5)
+    axes[0].axhline(y=0, color='r', linestyle='--')
+    axes[0].set_xlabel('Predicted Values')
+    axes[0].set_ylabel('Residuals')
+    axes[0].set_title('Residuals vs Predicted')
+
+    # 2. Q-Q Plot（检验正态性）
+    from scipy import stats
+    stats.probplot(residuals, dist="norm", plot=axes[1])
+    axes[1].set_title('Q-Q Plot')
+
+    # 3. 残差直方图
+    axes[2].hist(residuals, bins=20, edgecolor='black', alpha=0.7)
+    axes[2].set_xlabel('Residuals')
+    axes[2].set_ylabel('Frequency')
+    axes[2].set_title('Distribution of Residuals')
+
+    plt.tight_layout()
+    plt.show()
+
+# 使用示例（在上面的代码中加上：plot_residuals(y, X @ W_hat)）
+```
+
+# 七、线性回归的假设条件
+
+线性回归模型基于以下假设（Gauss-Markov 定理的前提）：
+
+1. **线性性（Linearity）**：$y$ 与 $\mathbf{X}$ 呈线性关系。如果 $E[\varepsilon] = 0$，则线性模型是 $E[y|\mathbf{X}]$ 的无偏估计。
+2. **独立性（Independence）**：样本之间相互独立。违背此假设（如时间序列数据的自相关）会导致标准误差低估。
+3. **同方差性（Homoscedasticity）**：误差项的方差恒定。异方差下，OLS 仍然无偏但不再是最有效的（BLUE 不成立）。
+4. **无完全多重共线性（No Perfect Multicollinearity）**：特征之间不存在完美的线性关系，否则 $\mathbf{X}^T\mathbf{X}$ 不可逆。
+5. **误差正态性（Normality of Errors，可选）**：做假设检验和置信区间时需要此假设，但估计参数本身不需要。
+
+```python
+def check_multicollinearity(X):
+    """检测多重共线性：计算VIF（Variance Inflation Factor）"""
+    # 去掉截距列
+    X_no_intercept = X[:, 1:] if X.shape[1] > 1 else X
+    corr_matrix = np.corrcoef(X_no_intercept.T)
+    print("特征相关矩阵:\n", corr_matrix)
+    # 高相关性（>0.9）说明存在共线性问题
+    high_corr = np.abs(corr_matrix) > 0.9
+    np.fill_diagonal(high_corr, False)
+    if high_corr.any():
+        print("警告：存在高度相关的特征对！")
+```
+
+# 八、线性回归何时会失效
+
+1. **非线性关系**：数据本身的关系是高度非线性的，一条直线无法捕捉其模式。解决方法：多项式特征、样条回归、非线性模型。
+2. **异常值的影响**：MSE 对异常值非常敏感（因为平方惩罚很大）。可使用 Huber Loss 或分位数回归。
+3. **高维灾难**：当 $d > n$（特征数大于样本数）时，$\mathbf{X}^T\mathbf{X}$ 不可逆。需使用岭回归（L2 正则化）或 Lasso 回归（L1 正则化）。
+4. **混淆变量和因果谬误**：相关性不等于因果性。线性回归发现的相关性可能受未观测的混淆变量驱动。
+
+## 总结
+
+| 方面 | 要点 |
+|------|------|
+| 模型形式 | $\hat{y} = \mathbf{X}\mathbf{W}$ |
+| 损失函数 | $\mathcal{L} = \frac{1}{n}\|\mathbf{X}\mathbf{W} - \mathbf{y}\|^2$ |
+| 闭式解 | $\mathbf{W}^* = (\mathbf{X}^T\mathbf{X})^{-1}\mathbf{X}^T\mathbf{y}$ |
+| 评估指标 | $R^2$, Adjusted $R^2$, MAE, MSE, RMSE |
+| 诊断工具 | 残差图、Q-Q 图、VIF |
+| 关键假设 | 线性、独立、同方差、无共线性 |
+
+理解线性回归的数学基础，是学习后续所有复杂模型（神经网络、深度学习）的基石。在下一课中，我们将使用 PyTorch 从零实现线性回归，并用梯度下降法来训练模型。

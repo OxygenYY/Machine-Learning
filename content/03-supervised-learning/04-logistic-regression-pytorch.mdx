@@ -1,0 +1,395 @@
+---
+title: "逻辑回归：PyTorch 实战"
+description: "动手实现逻辑回归：二分类数据集、Sigmoid 模型、BCE 损失训练、决策边界与混淆矩阵"
+part: "03-supervised-learning"
+order: 4
+difficulty: "beginner"
+estimatedMinutes: 35
+objectives:
+  - "使用 PyTorch 构建逻辑回归模型（nn.Linear + Sigmoid）"
+  - "理解 BCELoss 与 BCEWithLogitsLoss 的数值稳定性差异"
+  - "编写分类任务的训练循环，追踪准确率"
+  - "可视化决策边界和混淆矩阵"
+  - "学习阈值调优的基本方法"
+prerequisites: ["logistic-regression-theory", "linear-regression-pytorch"]
+keywords: ["pytorch", "logistic-regression", "bce-loss", "decision-boundary", "confusion-matrix"]
+---
+
+# 一、生成二分类数据集
+
+我们使用 `sklearn.datasets.make_blobs` 生成一个可控的二分类数据集：
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs, make_moons, make_circles
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (accuracy_score, confusion_matrix,
+                             classification_report, roc_auc_score,
+                             roc_curve, precision_recall_curve)
+
+torch.manual_seed(42)
+np.random.seed(42)
+
+# 生成两个簇，每个簇 500 个点
+X_np, y_np = make_blobs(n_samples=1000, n_features=2, centers=2,
+                         cluster_std=2.0, random_state=42)
+
+# 转换为 PyTorch 张量（float32 是神经网络训练的标配）
+X = torch.tensor(X_np, dtype=torch.float32)
+y = torch.tensor(y_np, dtype=torch.float32).unsqueeze(1)  # (n, 1)
+
+# 划分
+X_train, X_test, y_train, y_test = train_test_split(
+    X_np, y_np, test_size=0.2, random_state=42, stratify=y_np)
+
+X_train_t = torch.tensor(X_train, dtype=torch.float32)
+X_test_t = torch.tensor(X_test, dtype=torch.float32)
+y_train_t = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
+y_test_t = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+
+print(f"训练集: {X_train_t.shape}, 测试集: {X_test_t.shape}")
+print(f"正类比例: 训练集 {y_train.mean():.3f}, 测试集 {y_test.mean():.3f}")
+
+# 可视化
+plt.figure(figsize=(6, 5))
+plt.scatter(X_train[y_train==0, 0], X_train[y_train==0, 1],
+            alpha=0.6, label='Class 0 (train)', s=20)
+plt.scatter(X_train[y_train==1, 0], X_train[y_train==1, 1],
+            alpha=0.6, label='Class 1 (train)', s=20)
+plt.scatter(X_test[y_test==0, 0], X_test[y_test==0, 1],
+            alpha=0.8, label='Class 0 (test)', marker='s', s=30)
+plt.scatter(X_test[y_test==1, 0], X_test[y_test==1, 1],
+            alpha=0.8, label='Class 1 (test)', marker='s', s=30)
+plt.xlabel('Feature 1')
+plt.ylabel('Feature 2')
+plt.title('二分类数据集')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+# 二、方法一：nn.Linear(2,1) + nn.Sigmoid() + BCELoss
+
+```python
+class LogisticRegression(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, 1)  # 输出 logit
+        self.sigmoid = nn.Sigmoid()            # 转换为概率
+
+    def forward(self, x):
+        logits = self.linear(x)
+        probs = self.sigmoid(logits)
+        return probs
+
+model_v1 = LogisticRegression(input_dim=2)
+criterion_v1 = nn.BCELoss()  # 期望输入是概率（经过 Sigmoid 的）
+optimizer_v1 = optim.SGD(model_v1.parameters(), lr=0.1)
+
+# 训练
+n_epochs = 200
+losses_v1 = []
+
+for epoch in range(n_epochs):
+    model_v1.train()
+    probs = model_v1(X_train_t)        # 前向传播 -> 概率
+    loss = criterion_v1(probs, y_train_t)  # BCE(概率, 标签)
+
+    optimizer_v1.zero_grad()
+    loss.backward()
+    optimizer_v1.step()
+
+    losses_v1.append(loss.item())
+
+    if epoch % 50 == 0:
+        with torch.no_grad():
+            probs_test = model_v1(X_test_t)
+            preds_test = (probs_test > 0.5).float()
+            acc = (preds_test == y_test_t).float().mean().item()
+        print(f"Epoch {epoch:3d}: Loss={loss.item():.4f}, Test Acc={acc:.3f}")
+```
+
+# 三、方法二：nn.Linear(2,1) + BCEWithLogitsLoss（推荐）
+
+`BCEWithLogitsLoss` 将 Sigmoid 和 BCE 组合在一个函数中，利用 **log-sum-exp trick** 保证数值稳定性。这是**推荐的用法**。
+
+```python
+# BCEWithLogitsLoss = Sigmoid + BCELoss 的融合（数值稳定）
+model_v2 = nn.Linear(2, 1)  # 直接输出 logit，不需要显式 Sigmoid
+criterion_v2 = nn.BCEWithLogitsLoss()  # PyTorch 推荐！
+optimizer_v2 = optim.SGD(model_v2.parameters(), lr=0.1)
+
+n_epochs = 200
+losses_v2 = []
+
+for epoch in range(n_epochs):
+    model_v2.train()
+    logits = model_v2(X_train_t)          # 前向传播 -> logits（未经 Sigmoid）
+    loss = criterion_v2(logits, y_train_t)  # BCEWithLogitsLoss(logits, 标签)
+
+    optimizer_v2.zero_grad()
+    loss.backward()
+    optimizer_v2.step()
+
+    losses_v2.append(loss.item())
+
+    if epoch % 50 == 0:
+        with torch.no_grad():
+            logits_test = model_v2(X_test_t)
+            probs_test = torch.sigmoid(logits_test)  # 评估时才转概率
+            preds_test = (probs_test > 0.5).float()
+            acc = (preds_test == y_test_t).float().mean().item()
+        print(f"Epoch {epoch:3d}: Loss={loss.item():.4f}, Test Acc={acc:.3f}")
+```
+
+## 为什么 BCEWithLogitsLoss 更稳定？
+
+当 logit $z$ 是一个很大的负数时，$\sigma(z) \approx 0$，计算 $\log(\sigma(z))$ 可能产生 `-inf`。`BCEWithLogitsLoss` 内部使用：
+
+$$\text{loss} = \max(z, 0) - z \cdot y + \log(1 + e^{-|z|})$$
+
+这避免了显式计算 $\log(\sigma(z))$，在数值上更加稳定。
+
+```python
+# 对比两种方法的训练曲线
+plt.figure(figsize=(6, 4))
+plt.plot(losses_v1, label='BCELoss (Sigmoid + BCE)', alpha=0.8)
+plt.plot(losses_v2, label='BCEWithLogitsLoss (推荐)', alpha=0.8)
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.title('损失曲线对比')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+# 四、决策边界可视化
+
+将模型在整个特征空间上的预测结果绘制出来：
+
+```python
+def plot_decision_boundary(model, X, y, title="Decision Boundary", threshold=0.5):
+    """绘制二维特征空间的决策边界"""
+    model.eval()
+
+    # 创建网格
+    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 200),
+                         np.linspace(y_min, y_max, 200))
+
+    # 预测网格上每个点的概率
+    grid = torch.tensor(np.c_[xx.ravel(), yy.ravel()], dtype=torch.float32)
+    with torch.no_grad():
+        logits = model(grid)
+        probs = torch.sigmoid(logits).reshape(xx.shape)
+
+    # 绘图
+    plt.figure(figsize=(8, 6))
+    plt.contourf(xx, yy, probs.numpy(), levels=20, cmap='RdYlBu', alpha=0.6)
+    plt.colorbar(label='P(y=1 | x)')
+
+    # 绘制决策边界线 (P=0.5)
+    plt.contour(xx, yy, probs.numpy(), levels=[threshold],
+                colors='black', linewidths=2, linestyles='--')
+
+    # 绘制数据点
+    X_np = X.numpy() if isinstance(X, torch.Tensor) else X
+    y_np = y.numpy().flatten() if isinstance(y, torch.Tensor) else y.flatten()
+    plt.scatter(X_np[y_np==0, 0], X_np[y_np==0, 1],
+                c='blue', alpha=0.6, label='Class 0', edgecolors='k', linewidth=0.5)
+    plt.scatter(X_np[y_np==1, 0], X_np[y_np==1, 1],
+                c='red', alpha=0.6, label='Class 1', edgecolors='k', linewidth=0.5)
+
+    # 获取权重
+    with torch.no_grad():
+        w = model.weight.detach().numpy().flatten()
+        b = model.bias.detach().numpy().flatten()[0]
+    plt.title(f"{title}\nw=[{w[0]:.2f}, {w[1]:.2f}], b={b:.2f}")
+    plt.xlabel('Feature 1')
+    plt.ylabel('Feature 2')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_decision_boundary(model_v2, X_test_t, y_test_t, "Logistic Regression: Decision Boundary")
+```
+
+**关键观察**：决策边界是一条直线（因为逻辑回归是线性分类器）。模型权重 $\mathbf{w}$ 是决策边界的法向量。
+
+# 五、混淆矩阵与分类报告
+
+## 完整评估
+
+```python
+from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+
+model_v2.eval()
+with torch.no_grad():
+    logits_test = model_v2(X_test_t)
+    probs_test = torch.sigmoid(logits_test)
+    preds_test = (probs_test > 0.5).float()
+
+# 转换为 NumPy
+y_true = y_test_t.numpy().flatten()
+y_pred = preds_test.numpy().flatten()
+y_probs = probs_test.numpy().flatten()
+
+# 混淆矩阵
+cm = confusion_matrix(y_true, y_pred)
+print("混淆矩阵:")
+print(cm)
+
+# 可视化混淆矩阵
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+ConfusionMatrixDisplay(cm, display_labels=['Class 0', 'Class 1']).plot(
+    ax=axes[0], cmap='Blues', values_format='d')
+axes[0].set_title('Confusion Matrix')
+
+# 分类报告
+print("\n分类报告:")
+report = classification_report(y_true, y_pred, target_names=['Class 0', 'Class 1'])
+print(report)
+```
+
+## 混淆矩阵解读
+
+|                  | 预测 Class 0  | 预测 Class 1  |
+|------------------|---------------|---------------|
+| **实际 Class 0**  | TN (True Negative)  | FP (False Positive) |
+| **实际 Class 1**  | FN (False Negative) | TP (True Positive)  |
+
+关键指标：
+- **准确率 (Accuracy)**: $\frac{TP + TN}{TP + TN + FP + FN}$
+- **精确率 (Precision)**: $\frac{TP}{TP + FP}$ — 预测为正类中，实际为正的比例
+- **召回率 (Recall)**: $\frac{TP}{TP + FN}$ — 实际为正类中，被正确识别的比例
+- **F1-Score**: $\frac{2 \cdot \text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}$ — 精确率与召回率的调和平均
+
+# 六、ROC 曲线与 AUC
+
+ROC 曲线展示了不同阈值下 TPR（Recall）和 FPR 的权衡：
+
+```python
+# ROC Curve
+fpr, tpr, thresholds = roc_curve(y_true, y_probs)
+roc_auc = roc_auc_score(y_true, y_probs)
+
+axes[1].plot(fpr, tpr, 'b-', linewidth=2, label=f'ROC (AUC = {roc_auc:.3f})')
+axes[1].plot([0, 1], [0, 1], 'gray', linestyle='--', alpha=0.7, label='Random')
+axes[1].set_xlabel('False Positive Rate')
+axes[1].set_ylabel('True Positive Rate')
+axes[1].set_title('ROC Curve')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"ROC-AUC: {roc_auc:.4f}")
+
+# 为什么 AUC 重要
+if roc_auc > 0.9:
+    print("AUC > 0.9: 分类性能极好，两类几乎完全可分。")
+elif roc_auc > 0.8:
+    print("AUC > 0.8: 分类性能良好。")
+else:
+    print("AUC <= 0.8: 可能存在较大的分类重叠，考虑更复杂的模型。")
+```
+
+# 七、阈值调优
+
+默认使用 0.5 作为分类阈值不一定最优。不同场景对 Precision 和 Recall 的侧重不同：
+
+- **高 Precision 场景**（垃圾邮件过滤）：宁可不拦截，也不误拦截正常邮件
+- **高 Recall 场景**（疾病筛查）：宁可误报，也不漏过一个患者
+
+```python
+# 搜索最优阈值（基于 F1-Score）
+best_threshold = 0.5
+best_f1 = 0.0
+thresholds_range = np.linspace(0.1, 0.9, 81)
+f1_scores = []
+
+for t in thresholds_range:
+    preds_t = (y_probs >= t).astype(float)
+    # 手动计算 F1
+    tp = np.sum((preds_t == 1) & (y_true == 1))
+    fp = np.sum((preds_t == 1) & (y_true == 0))
+    fn = np.sum((preds_t == 0) & (y_true == 1))
+    precision = tp / (tp + fp + 1e-10)
+    recall = tp / (tp + fn + 1e-10)
+    f1 = 2 * precision * recall / (precision + recall + 1e-10)
+    f1_scores.append(f1)
+
+    if f1 > best_f1:
+        best_f1 = f1
+        best_threshold = t
+
+plt.figure(figsize=(6, 4))
+plt.plot(thresholds_range, f1_scores, 'b-', linewidth=2)
+plt.axvline(x=best_threshold, color='r', linestyle='--',
+            label=f'Best threshold = {best_threshold:.2f}')
+plt.axvline(x=0.5, color='gray', linestyle='--', alpha=0.7, label='Default 0.5')
+plt.xlabel('Threshold')
+plt.ylabel('F1 Score')
+plt.title('F1 Score vs Threshold')
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+
+print(f"最佳阈值: {best_threshold:.2f}, 最佳 F1: {best_f1:.4f}")
+
+# 使用最佳阈值重新评估
+preds_optimized = (y_probs >= best_threshold).astype(float)
+acc_opt = accuracy_score(y_true, preds_optimized)
+print(f"默认阈值 0.50 — Accuracy: {accuracy_score(y_true, (y_probs>=0.5).astype(float)):.4f}")
+print(f"最优阈值 {best_threshold:.2f} — Accuracy: {acc_opt:.4f}")
+```
+
+# 八、完整训练评估脚本
+
+```python
+# ===== 完整示例 =====
+torch.manual_seed(42)
+
+# 1. 数据
+X_np, y_np = make_blobs(n_samples=1000, n_features=2, centers=2,
+                         cluster_std=1.5, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X_np, y_np, test_size=0.2, random_state=42, stratify=y_np)
+X_train_t = torch.tensor(X_train, dtype=torch.float32)
+X_test_t = torch.tensor(X_test, dtype=torch.float32)
+y_train_t = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1)
+y_test_t = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1)
+
+# 2. 模型
+model = nn.Linear(2, 1)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.SGD(model.parameters(), lr=0.01)
+
+# 3. 训练
+for epoch in range(500):
+    optimizer.zero_grad()
+    loss = criterion(model(X_train_t), y_train_t)
+    loss.backward()
+    optimizer.step()
+
+# 4. 评估
+model.eval()
+with torch.no_grad():
+    probs = torch.sigmoid(model(X_test_t))
+    preds = (probs > 0.5).float()
+    acc = accuracy_score(y_test, preds.numpy())
+    auc = roc_auc_score(y_test, probs.numpy())
+
+print(f"最终测试准确率: {acc:.4f}")
+print(f"最终测试 AUC: {auc:.4f}")
+print(f"学到的权重: {model.weight.data.numpy().flatten()}")
+print(f"学到的偏置: {model.bias.data.item():.4f}")
+```
+
+逻辑回归虽然简单，但它是理解所有神经网络分类器的基石。掌握了它，就等于掌握了从线性回归到深度分类的桥梁。

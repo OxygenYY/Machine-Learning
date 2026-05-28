@@ -1,0 +1,614 @@
+---
+title: "线性代数深入"
+description: "掌握向量、矩阵、特征值与 SVD——理解神经网络和降维算法的数学核心"
+part: "00-prerequisites"
+order: 3
+difficulty: "beginner"
+estimatedMinutes: 45
+objectives:
+  - "理解向量与向量运算的几何意义"
+  - "掌握矩阵乘法、转置和逆矩阵"
+  - "理解行列式、迹和秩的直观含义"
+  - "理解特征值、特征向量及其在 ML 中的应用"
+  - "了解 SVD 及其在降维中的作用"
+  - "使用 NumPy 实现每个线性代数概念"
+prerequisites:
+  - "numpy-fundamentals"
+keywords:
+  - "linear algebra"
+  - "eigenvalues"
+  - "SVD"
+  - "matrix multiplication"
+  - "vectors"
+---
+
+## 为什么线性代数是 ML 的核心语言？
+
+机器学习在本质上是对数据张量（多维数组）的变换和组合。每一条数据是一个向量，每一个模型层是一次线性变换（矩阵乘法），然后是逐元素的非线性激活。整个神经网络可以看作一系列线性代数运算的堆叠。
+
+本节不会像教科书那样从公理出发。我们会始终紧扣一个问题：**这个数学概念在 ML 中到底有什么用？**
+
+先安装必要的工具：
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 全局设置：打印小数精度
+np.set_printoptions(precision=3, suppress=True)
+```
+
+## 1. 向量 (Vectors)
+
+### 定义与表示
+
+向量是有序的一组数。在 ML 中，向量有三重身份：
+- **数据点**：一个样本的所有特征（例如一张图片展开后是 784 维向量）
+- **模型参数**：一个神经元的权重是一个向量
+- **梯度**：损失函数对所有参数的偏导数构成梯度向量
+
+```python
+# 向量就是 1 维 NumPy 数组
+v = np.array([3, 4])
+print(f"向量 v = {v}")
+print(f"维度: {v.shape[0]}")
+
+# 向量也可以表示为列向量或行向量
+v_col = np.array([[3], [4]])  # 列向量 (2, 1)
+v_row = np.array([[3, 4]])    # 行向量 (1, 2)
+```
+
+### 基本运算
+
+```python
+u = np.array([1, 2])
+v = np.array([3, 4])
+
+# 标量乘法（缩放）
+print(f"2 * v = {2 * v}")  # [6 8]
+
+# 向量加法（平行四边形法则）
+print(f"u + v = {u + v}")  # [4 6]
+
+# 向量减法（差异向量）
+print(f"v - u = {v - u}")  # [2 2]
+```
+
+### 点积 (Dot Product) — 神经元计算的核心
+
+两个向量的点积定义为对应元素相乘后求和：
+
+$$\mathbf{u} \cdot \mathbf{v} = \sum_{i=1}^{n} u_i v_i = u_1 v_1 + u_2 v_2 + \cdots + u_n v_n$$
+
+**几何意义**：点积测量两个向量的"对齐程度"：
+
+$$\mathbf{u} \cdot \mathbf{v} = \|\mathbf{u}\| \|\mathbf{v}\| \cos\theta$$
+
+当两个向量方向相同时点积最大，垂直时为 0，相反时最小。
+
+**ML 意义**：一个神经元的输出就是输入向量与权重向量的点积（再加偏置和非线性激活）：
+
+$$z = \mathbf{w} \cdot \mathbf{x} + b = \sum_i w_i x_i + b$$
+
+```python
+# 模拟一个神经元的计算
+x = np.array([0.5, 0.3, 0.2])     # 输入特征
+w = np.array([0.4, -0.2, 0.1])    # 权重
+b = 0.05                           # 偏置
+
+z = np.dot(w, x) + b               # 点积 + 偏置
+print(f"神经元输出 (线性部分): {z:.4f}")
+
+# 也可以用 @ 运算符
+z2 = w @ x + b
+print(f"使用 @ 运算符: {z2:.4f}")
+
+# 理解点积：输入与权重的"匹配度"
+# w 中的正值表示该特征增加输出，负值表示减少输出
+contributions = w * x
+for i, (wi, xi, ci) in enumerate(zip(w, x, contributions)):
+    direction = "增加" if ci > 0 else "减少"
+    print(f"  特征 {i}: 权重={wi:+.1f} * 输入={xi:.1f} = {ci:+.2f} ({direction})")
+print(f"  偏置: {b:+.2f}")
+print(f"  合计: {z:.2f}")
+```
+
+### 范数 (Norm) — 向量的大小
+
+$L^2$ 范数（欧几里得长度）是最常用的：
+
+$$\|\mathbf{v}\|_2 = \sqrt{v_1^2 + v_2^2 + \cdots + v_n^2}$$
+
+**ML 意义**：
+- **正则化**：$L^2$ 正则项 $\lambda\|\mathbf{w}\|_2^2$ 防止权重过大
+- **梯度裁剪**：限制梯度的 $L^2$ 范数防止梯度爆炸
+- **相似度**：余弦相似度 = 归一化后的点积
+
+```python
+v = np.array([3, 4])
+
+# L2 范数 — 欧几里得长度
+l2 = np.linalg.norm(v)
+print(f"L2 范数: {l2}")  # 5.0
+
+# L1 范数 — 曼哈顿距离（稀疏性诱导）
+l1 = np.linalg.norm(v, ord=1)
+print(f"L1 范数: {l1}")  # 7.0
+
+# 单位向量（方向向量）
+v_unit = v / l2
+print(f"单位向量: {v_unit}, 长度: {np.linalg.norm(v_unit):.1f}")
+
+# 余弦相似度 — 高维空间中衡量两个向量夹角的常用指标
+def cosine_similarity(a, b):
+    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+
+a = np.array([1, 2, 3])
+b = np.array([2, 4, 6])    # a 的 2 倍 — 方向完全一致
+c = np.array([-1, -2, -3])  # a 的相反方向
+
+print(f"cos(a, b): {cosine_similarity(a, b):.3f}")  # 1.0（完全相同方向）
+print(f"cos(a, c): {cosine_similarity(a, c):.3f}")  # -1.0（完全相反）
+
+# 实际应用：计算两个文档的 TF-IDF 向量的余弦相似度
+```
+
+## 2. 矩阵 (Matrices)
+
+### 定义
+
+矩阵是二维数组，可以看作行向量的集合或列向量的集合。
+
+**ML 意义**：
+- **数据集**：$m \times n$ 矩阵 = $m$ 个样本，每个 $n$ 个特征
+- **权重矩阵**：全连接层从 $n$ 维映射到 $m$ 维，权重矩阵为 $n \times m$
+- **图像**：灰度图为 $H \times W$ 矩阵
+
+```python
+# 3 个样本，4 个特征的"经典"数据矩阵
+X = np.array([[2.5, 1.0, 0.5, 3.0],   # 样本 0
+              [1.0, 3.0, 2.0, 1.5],   # 样本 1
+              [3.0, 2.0, 1.0, 4.0]])  # 样本 2
+print(f"数据矩阵形状: {X.shape}")  # (3, 4)
+print(f"样本数: {X.shape[0]}, 特征数: {X.shape[1]}")
+```
+
+### 矩阵加法与标量乘法
+
+```python
+A = np.array([[1, 2], [3, 4]])
+B = np.array([[5, 6], [7, 8]])
+
+# 逐元素加法
+print(f"A + B =\n{A + B}")
+
+# 标量乘法
+print(f"3 * A =\n{3 * A}")
+```
+
+### 矩阵乘法 — 理解神经网络的关键
+
+矩阵乘法 $\mathbf{C} = \mathbf{A}\mathbf{B}$ 的规则：$\mathbf{A}$ 的列数必须等于 $\mathbf{B}$ 的行数。
+
+$$C_{ij} = \sum_{k} A_{ik} B_{kj}$$
+
+**ML 意义**：矩阵乘法是一次性对所有样本进行前向传播的方式！
+
+```python
+# 全连接层的批量前向传播
+# 输入: 4 个样本，每个 3 维特征
+X = np.array([[1, 2, 3],
+              [4, 5, 6],
+              [7, 8, 9],
+              [2, 3, 4]])
+
+# 权重: 3 个输入 -> 2 个输出
+W = np.array([[0.1, 0.2],
+              [0.3, 0.4],
+              [0.5, 0.6]])
+
+# 偏置
+b = np.array([0.1, -0.1])
+
+# 一次矩阵乘法完成 4 个样本的前向传播！
+Z = X @ W + b
+print(f"输出形状: {Z.shape}")  # (4, 2) — 4 个样本，每个 2 维输出
+print(f"每个样本的 logits:\n{Z}")
+
+# 验证：手动计算第一个样本
+manual = np.array([
+    X[0,0]*W[0,0] + X[0,1]*W[1,0] + X[0,2]*W[2,0] + b[0],
+    X[0,0]*W[0,1] + X[0,1]*W[1,1] + X[0,2]*W[2,1] + b[1],
+])
+print(f"手动计算样本 0: {manual}")
+print(f"矩阵乘法结果: {Z[0]}")
+```
+
+### 矩阵乘法的几何视角
+
+矩阵乘法 $\mathbf{y} = \mathbf{A}\mathbf{x}$ 可以被理解为**线性变换**：将向量 $\mathbf{x}$ 旋转、缩放、有时翻转或投影到一个新的空间中。神经网络的每一层都在做这件事。
+
+```python
+# 可视化一个 2D 线性变换
+A = np.array([[2, 1],
+              [1, 2]])
+
+# 原始向量
+x = np.array([1, 0])
+x2 = np.array([0, 1])
+
+# 变换后的向量
+Ax = A @ x
+Ax2 = A @ x2
+
+print(f"A * [1, 0]^T = {Ax}")   # [2 1]
+print(f"A * [0, 1]^T = {Ax2}")  # [1 2]
+# 这意味着基向量 [1,0] 被映射到 [2,1]，[0,1] 被映射到 [1,2]
+```
+
+### 转置 (Transpose)
+
+将矩阵的行列互换：$(A^T)_{ij} = A_{ji}$。
+
+**ML 意义**：梯度反向传播中频繁使用转置：
+
+$$\frac{\partial L}{\partial \mathbf{X}} = \frac{\partial L}{\partial \mathbf{Y}} \cdot \mathbf{W}^T$$
+
+```python
+A = np.array([[1, 2, 3],
+              [4, 5, 6]])
+print(f"A:\n{A}")
+print(f"A^T:\n{A.T}")
+print(f"(A^T)^T == A: {np.allclose(A.T.T, A)}")
+```
+
+### 逆矩阵 (Inverse)
+
+方阵 $\mathbf{A}$ 的逆 $\mathbf{A}^{-1}$ 满足 $\mathbf{A}\mathbf{A}^{-1} = \mathbf{A}^{-1}\mathbf{A} = \mathbf{I}$。
+
+**ML 意义**：逆矩阵用于求解最小二乘法、白化变换、以及某些概率模型中的精度矩阵（协方差矩阵的逆）。
+
+**重要**：在深度学习中，几乎从不显式计算逆矩阵——它太昂贵（$O(n^3)$）且数值不稳定。伪逆或求解线性方程组的方式被替代使用。
+
+```python
+A = np.array([[4, 7],
+              [2, 6]])
+
+A_inv = np.linalg.inv(A)
+print(f"A:\n{A}")
+print(f"A^-1:\n{A_inv}")
+
+# 验证
+print(f"A @ A^-1:\n{A @ A_inv}")
+# 应该是单位矩阵（可能有很小的舍入误差）
+
+# 伪逆 (Moore-Penrose) — 用于非方阵或奇异矩阵
+B = np.array([[1, 2, 3],
+              [4, 5, 6]])  # (2, 3) 非方阵
+B_pinv = np.linalg.pinv(B)
+print(f"B 的伪逆形状: {B_pinv.shape}")  # (3, 2)
+```
+
+## 3. 矩阵的重要属性
+
+### 行列式 (Determinant)
+
+行列式 $\det(\mathbf{A})$ 衡量线性变换对体积/面积的缩放因子。
+
+- $\det(\mathbf{A}) = 0$ 表示矩阵是奇异的（不可逆），变换将空间压缩到了更低维度
+- $\det(\mathbf{A}) > 0$ 保持方向，$\det(\mathbf{A}) < 0$ 翻转方向
+
+**ML 意义**：行列式出现在多元正态分布的概率密度函数中（$\frac{1}{\sqrt{(2\pi)^k|\mathbf{\Sigma}|}}$），也出现在 PCA 中判断协方差矩阵是否退化。
+
+```python
+A = np.array([[4, 7], [2, 6]])
+print(f"det(A) = {np.linalg.det(A):.2f}")
+
+# 奇异矩阵 — 行列式为 0
+singular = np.array([[1, 2], [2, 4]])  # 第二行是第一行的 2 倍
+print(f"det(singular) = {np.linalg.det(singular):.10f}")
+
+# 验证不可逆
+try:
+    np.linalg.inv(singular)
+except np.linalg.LinAlgError as e:
+    print(f"奇异矩阵不可逆: {e}")
+```
+
+### 迹 (Trace)
+
+迹是矩阵对角线元素之和：$\text{tr}(\mathbf{A}) = \sum_i A_{ii}$。
+
+**ML 意义**：迹出现在矩阵微分的许多恒等式中，也用于计算矩阵的 Frobenius 范数：$\|\mathbf{A}\|_F^2 = \text{tr}(\mathbf{A}^T\mathbf{A})$。
+
+```python
+A = np.array([[1, 2, 3],
+              [4, 5, 6],
+              [7, 8, 9]])
+print(f"tr(A) = {np.trace(A)}")  # 1 + 5 + 9 = 15
+```
+
+### 秩 (Rank)
+
+矩阵的秩 = 线性无关的行（或列）的最大数量 = 矩阵所张成空间的维度。
+
+**ML 意义**：
+- 数据矩阵的秩告诉我们特征之间的冗余程度
+- 低秩近似是推荐系统（协同过滤）和模型压缩的核心思想
+
+```python
+# 满秩矩阵
+full_rank = np.array([[1, 0, 0],
+                      [0, 1, 0],
+                      [0, 0, 1]])
+print(f"满秩矩阵的秩: {np.linalg.matrix_rank(full_rank)}")  # 3
+
+# 秩亏矩阵（特征冗余）
+rank_deficient = np.array([[1, 2, 3],
+                           [2, 4, 6],
+                           [3, 6, 9]])  # 所有行互相成比例
+print(f"秩亏矩阵的秩: {np.linalg.matrix_rank(rank_deficient)}")  # 1
+
+# 实际意义：如果数据矩阵的秩远小于特征数，说明有大量冗余特征
+# -> 可以用 PCA 降维
+data = np.random.randn(100, 50)
+print(f"随机数据的秩 (应接近 50): {np.linalg.matrix_rank(data)}")
+```
+
+## 4. 特征值与特征向量
+
+### 定义
+
+对于方阵 $\mathbf{A}$，如果存在非零向量 $\mathbf{v}$ 和标量 $\lambda$ 满足：
+
+$$\mathbf{A}\mathbf{v} = \lambda \mathbf{v}$$
+
+则 $\mathbf{v}$ 是特征向量，$\lambda$ 是对应的特征值。
+
+**几何直觉**：特征向量是那些被矩阵 $\mathbf{A}$ 变换后**仅被缩放（不改变方向）**的特殊方向。特征值就是缩放因子。
+
+### ML 中的核心应用
+
+1. **PCA（主成分分析）**：协方差矩阵的特征向量 = 数据方差最大的方向（主成分）
+2. **谱聚类 (Spectral Clustering)**：利用拉普拉斯矩阵的特征向量进行聚类
+3. **梯度下降的收敛性**：Hessian 矩阵的特征值决定学习率的上限
+4. **PageRank**：Google 的最初排名算法就是计算转移矩阵的特征向量
+
+```python
+# 计算特征值和特征向量
+A = np.array([[4, 1],
+              [2, 3]])
+
+eigenvalues, eigenvectors = np.linalg.eig(A)
+
+print("特征值:")
+for i, ev in enumerate(eigenvalues):
+    print(f"  λ_{i} = {ev:.3f}")
+
+print("\n特征向量 (列向量):")
+print(eigenvectors)
+
+# 验证: A @ v_i = λ_i * v_i
+for i in range(len(eigenvalues)):
+    v_i = eigenvectors[:, i]
+    Av_i = A @ v_i
+    lambda_v_i = eigenvalues[i] * v_i
+    print(f"\n验证特征向量 {i}:")
+    print(f"  A @ v_{i} = {Av_i}")
+    print(f"  λ_{i} * v_{i} = {lambda_v_i}")
+    print(f"  匹配: {np.allclose(Av_i, lambda_v_i)}")
+```
+
+### PCA 手动实现
+
+用特征分解实现 PCA，直观理解降维的原理：
+
+```python
+def pca_from_scratch(X, n_components):
+    """
+    使用特征分解实现 PCA
+    
+    步骤：
+    1. 数据中心化（减去均值）
+    2. 计算协方差矩阵
+    3. 对协方差矩阵进行特征分解
+    4. 取最大的 n_components 个特征值对应的特征向量
+    5. 将数据投影到这些特征向量上
+    """
+    # 1. 中心化
+    X_centered = X - X.mean(axis=0)
+    
+    # 2. 协方差矩阵
+    cov_matrix = np.cov(X_centered, rowvar=False)
+    
+    # 3. 特征分解
+    eigenvalues, eigenvectors = np.linalg.eigh(cov_matrix)
+    
+    # 4. 按特征值降序排列
+    sorted_idx = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[sorted_idx]
+    eigenvectors = eigenvectors[:, sorted_idx]
+    
+    # 5. 取前 k 个主成分
+    top_eigenvectors = eigenvectors[:, :n_components]
+    
+    # 6. 投影
+    X_reduced = X_centered @ top_eigenvectors
+    
+    # 解释方差比例
+    explained_variance_ratio = eigenvalues[:n_components] / eigenvalues.sum()
+    
+    return X_reduced, explained_variance_ratio, top_eigenvectors
+
+# 生成模拟数据
+np.random.seed(42)
+n_samples = 100
+# 在 2D 空间中沿对角线分布的数据（高度相关）
+base = np.random.randn(n_samples, 1)
+X_2d = np.hstack([base, 0.8 * base + 0.2 * np.random.randn(n_samples, 1)])
+
+# 应用 PCA 降到 1 维
+X_1d, explained_var, components = pca_from_scratch(X_2d, n_components=1)
+
+print(f"原始数据形状: {X_2d.shape}")
+print(f"降维后形状: {X_1d.shape}")
+print(f"主成分方向: {components.flatten()}")
+print(f"解释方差比例: {explained_var[0]:.2%}")
+# 通常第一个主成分解释了绝大部分方差（因为数据高度相关）
+```
+
+## 5. SVD（奇异值分解）
+
+### 定义
+
+任何 $m \times n$ 矩阵 $\mathbf{A}$ 都可以分解为：
+
+$$\mathbf{A} = \mathbf{U} \mathbf{\Sigma} \mathbf{V}^T$$
+
+其中：
+- $\mathbf{U}$ 是 $m \times m$ 正交矩阵（左奇异向量）
+- $\mathbf{\Sigma}$ 是 $m \times n$ 对角矩阵（奇异值，非负且递减）
+- $\mathbf{V}^T$ 是 $n \times n$ 正交矩阵的转置（右奇异向量）
+
+**直觉**：SVD 将任意矩阵分解为旋转 + 缩放 + 旋转三个操作。奇异值代表了变换沿各个正交方向的缩放因子。
+
+### ML 中的核心应用
+
+1. **PCA 的数值稳定实现**：sklearn 的 PCA 内部使用 SVD 而非特征分解
+2. **降维**：保留最大的 $k$ 个奇异值，得到最优的低秩近似（Eckart-Young 定理）
+3. **推荐系统**：Netflix 竞赛中的协同过滤本质上就是 SVD
+4. **矩阵压缩**：$\mathbf{A} \approx \mathbf{U}_k \mathbf{\Sigma}_k \mathbf{V}_k^T$，存储量从 $m \times n$ 降为 $k(m+n+1)$
+5. **伪逆计算**：$\mathbf{A}^+ = \mathbf{V}\mathbf{\Sigma}^+\mathbf{U}^T$
+
+```python
+# SVD 分解
+A = np.array([[1, 2, 3],
+              [4, 5, 6],
+              [7, 8, 9],
+              [10, 11, 12]])
+print(f"原始矩阵形状: {A.shape}")
+
+U, S, Vt = np.linalg.svd(A, full_matrices=False)
+
+print(f"U 形状: {U.shape}")      # (4, 3)
+print(f"奇异值: {S}")            # [25.46, 1.29, 0.0]
+print(f"Vt 形状: {Vt.shape}")    # (3, 3)
+
+# 重建原始矩阵
+Sigma = np.diag(S)
+A_reconstructed = U @ Sigma @ Vt
+print(f"\n重建是否正确: {np.allclose(A, A_reconstructed)}")
+
+# 低秩近似（只保留前 k 个奇异值）
+k = 2
+U_k = U[:, :k]
+S_k = S[:k]
+Vt_k = Vt[:k, :]
+A_approx = U_k @ np.diag(S_k) @ Vt_k
+print(f"\n使用 k={k} 个奇异值的近似 (形状不变): {A_approx.shape}")
+print(f"原始矩阵:\n{A}")
+print(f"\n低秩近似:\n{A_approx.round(2)}")
+
+# 近似误差
+error = np.linalg.norm(A - A_approx, ord="fro")
+print(f"\nFrobenius 近似误差: {error:.4f}")
+```
+
+### SVD 用于图像压缩演示
+
+```python
+# 创建一个简单的"图像"矩阵
+np.random.seed(42)
+img = np.zeros((20, 30))
+# 添加一些"图案"
+img[5:15, 10:20] = 1.0
+img[3:8, 5:10] = 0.7
+img[14:18, 15:25] = 0.5
+
+# SVD 分解
+U, S, Vt = np.linalg.svd(img, full_matrices=False)
+
+print(f"总奇异值数量: {len(S)}")
+print(f"奇异值 (前 5): {S[:5]}")
+print(f"奇异值平方和 (总能量): {(S**2).sum():.2f}")
+
+# 只用前 k 个奇异值的解释能量
+for k in [1, 2, 5, 10]:
+    energy_ratio = (S[:k]**2).sum() / (S**2).sum()
+    compression = (k * (20 + 30 + 1)) / (20 * 30)  # 压缩后 / 原始大小
+    print(f"k={k:2d}: 保留 {energy_ratio:.1%} 的能量, "
+          f"存储比例 {compression:.1%}")
+```
+
+## 6. 综合：线性代数在 ML 中的完整数据流
+
+让我们追踪一个数据 batch 在一次神经网络前向传播中经历的所有线性代数操作：
+
+```python
+# 配置
+batch_size = 32
+input_features = 784    # MNIST 图片展平
+hidden_1 = 128
+hidden_2 = 64
+num_classes = 10
+
+# 输入：32 张 MNIST 图片
+X = np.random.randn(batch_size, input_features)
+print(f"1. 输入 X: {X.shape}")
+
+# 第一层：线性变换 (784 -> 128)
+W1 = np.random.randn(input_features, hidden_1) * np.sqrt(2.0 / input_features)
+b1 = np.zeros(hidden_1)
+Z1 = X @ W1 + b1                    # 矩阵乘法 + 广播
+print(f"2. Z1 = X @ W1 + b1: {Z1.shape}")
+
+# ReLU 激活：逐元素非线性
+A1 = np.maximum(0, Z1)             # 向量化操作
+print(f"3. A1 = ReLU(Z1): {A1.shape}")
+
+# 第二层：线性变换 (128 -> 64)
+W2 = np.random.randn(hidden_1, hidden_2) * np.sqrt(2.0 / hidden_1)
+b2 = np.zeros(hidden_2)
+Z2 = A1 @ W2 + b2
+print(f"4. Z2 = A1 @ W2 + b2: {Z2.shape}")
+
+# 第二层激活
+A2 = np.maximum(0, Z2)
+print(f"5. A2 = ReLU(Z2): {A2.shape}")
+
+# 输出层 (64 -> 10)
+W3 = np.random.randn(hidden_2, num_classes) * np.sqrt(2.0 / hidden_2)
+b3 = np.zeros(num_classes)
+logits = A2 @ W3 + b3
+print(f"6. logits = A2 @ W3 + b3: {logits.shape}")
+
+# Softmax：将 logits 转换为概率分布
+exp_logits = np.exp(logits - logits.max(axis=1, keepdims=True))
+probs = exp_logits / exp_logits.sum(axis=1, keepdims=True)
+print(f"7. Softmax 概率分布: {probs.shape}")
+print(f"   每行概率和 (应为 1): {probs.sum(axis=1)[:3].round(6)}")
+
+# 预测类别 (argmax)
+predictions = np.argmax(probs, axis=1)
+print(f"8. 预测类别: {predictions.shape}")
+print(f"\n一条完整的前向传播 = 矩阵乘法 + 非线性激活的交替堆叠")
+print(f"所有操作都是线性代数的直接应用！")
+```
+
+## 总结
+
+线性代数是机器学习的"母语"。本节的核心要点：
+
+1. **向量** 是数据、参数和梯度的基本单位。点积 $\mathbf{w} \cdot \mathbf{x}$ 就是神经元的计算。范数用于正则化和梯度控制。
+
+2. **矩阵乘法** $\mathbf{X}\mathbf{W}$ 是一次性批量前向传播的数学形式。理解矩阵乘法 = 理解了神经网络的计算本质。
+
+3. **特征值与特征向量** 揭露了矩阵变换的"内在几何"。PCA 就是找协方差矩阵的最主要特征向量方向——数据方差最大的方向。
+
+4. **SVD** 是线性代数中的"瑞士军刀"：降维、压缩、推荐系统、伪逆——几乎任何涉及矩阵的问题，SVD 都能提供优雅的解决方案。
+
+5. **练习建议**：如果想深入理解，试着用 NumPy 从头实现一个简单的 PCA，或者手算一个 $2 \times 2$ 矩阵的特征分解。亲手操作比阅读十遍更有效。
+
+---
+
+下一节：[微积分与优化](/lesson/calculus-optimization) — 理解梯度下降和反向传播的数学基础。

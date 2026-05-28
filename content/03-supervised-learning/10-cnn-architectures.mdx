@@ -1,0 +1,332 @@
+---
+title: "CNN 经典架构演进"
+description: "从 LeNet-5 到 DenseNet，追踪 CNN 架构二十年的演进脉络，理解每个里程碑的核心创新与设计哲学。"
+part: "03-supervised-learning"
+order: 10
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "掌握 LeNet-5、AlexNet、VGG、GoogLeNet、ResNet、DenseNet 的核心设计"
+  - "理解架构演进的趋势：更深、更多连接、更好的正则化"
+  - "理解残差连接和密集连接的设计动机"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra", "dnn-architecture", "cnn-foundations"]
+keywords: ["LeNet", "AlexNet", "VGG", "GoogLeNet", "Inception", "ResNet", "DenseNet", "CNN架构"]
+---
+
+## LeNet-5 (1998)：卷积网络的开端
+
+Yann LeCun 等人提出的 LeNet-5 是第一个成功的卷积神经网络，用于手写数字识别（MNIST）。它的架构极其简洁但奠定了 CNN 的基本范式。
+
+**架构**：Input(32×32) → Conv(5×5, 6) → AvgPool(2×2) → Conv(5×5, 16) → AvgPool(2×2) → FC(120) → FC(84) → FC(10)
+
+```python
+import torch.nn as nn
+
+class LeNet5(nn.Module):
+    """LeNet-5 复现（适配 28×28 MNIST 输入）"""
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 6, kernel_size=5, padding=2)  # 28→28
+        self.pool1 = nn.AvgPool2d(2, 2)                          # 28→14
+        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)             # 14→10
+        self.pool2 = nn.AvgPool2d(2, 2)                          # 10→5
+        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.fc3 = nn.Linear(84, num_classes)
+
+    def forward(self, x):
+        x = torch.tanh(self.conv1(x))
+        x = self.pool1(x)
+        x = torch.tanh(self.conv2(x))
+        x = self.pool2(x)
+        x = x.view(x.size(0), -1)  # 展平
+        x = torch.tanh(self.fc1(x))
+        x = torch.tanh(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+print("LeNet-5 参数量:", sum(p.numel() for p in LeNet5().parameters()))
+```
+
+**核心贡献**：卷积-池化-全连接的经典范式，验证了 CNN 在视觉任务上的有效性。
+
+## AlexNet (2012)：深度学习革命的序幕
+
+AlexNet 在 ImageNet 2012 竞赛中以巨大优势夺冠（top-5 错误率 15.3% vs 第二名 26.2%），标志着深度学习时代的到来。
+
+**关键创新**：
+- 首次使用 **ReLU** 激活函数，缓解梯度消失，加速训练
+- **Dropout** 正则化防止过拟合
+- 双 **GPU** 并行训练（当时 GPU 内存限制）
+- 局部响应归一化（LRN，后来被 BatchNorm 取代）
+- 数据增强（随机裁剪、水平翻转）
+
+```python
+class AlexNet(nn.Module):
+    """AlexNet 简化版"""
+    def __init__(self, num_classes=1000):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 96, kernel_size=11, stride=4, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2),
+            nn.Conv2d(96, 256, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2),
+            nn.Conv2d(256, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 384, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(384, 256, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(256 * 6 * 6, 4096),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(4096, 4096),
+            nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+print("AlexNet 参数量:", f"{sum(p.numel() for p in AlexNet().parameters()) / 1e6:.1f}M")
+```
+
+## VGG (2014)：深度之美在于简单
+
+牛津大学 VGG 团队的核心理念：**用小卷积核（3×3）堆叠代替大卷积核**。两个 3×3 卷积的感受野等同于一个 5×5 卷积，但参数更少且引入更多非线性。
+
+```python
+class VGG16(nn.Module):
+    """VGG-16 结构"""
+    def __init__(self, num_classes=1000):
+        super().__init__()
+        self.features = nn.Sequential(
+            # Block 1
+            nn.Conv2d(3, 64, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(64, 64, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            # Block 2
+            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(128, 128, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            # Block 3
+            nn.Conv2d(128, 256, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            # Block 4
+            nn.Conv2d(256, 512, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+            # Block 5
+            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(),
+            nn.MaxPool2d(2, 2),
+        )
+        self.classifier = nn.Sequential(
+            nn.Linear(512 * 7 * 7, 4096), nn.ReLU(), nn.Dropout(0.5),
+            nn.Linear(4096, 4096), nn.ReLU(), nn.Dropout(0.5),
+            nn.Linear(4096, num_classes),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+# VGG 设计原则验证：2 个 3×3 卷积的感受野 = 1 个 5×5 卷积
+print("2×3×3 卷积参数量:", 2 * 3 * 3, "=", 18)      # 18 个权重
+print("5×5 卷积参数量:",  5 * 5,         "=", 25)   # 25 个权重
+print("节省参数量: ~28%")
+```
+
+**设计哲学**：简单统一的架构（仅用 3×3 conv 和 2×2 maxpool），以深度换取性能。VGG-16 有 138M 参数，主要集中在大全连接层。
+
+## GoogLeNet / Inception (2014)：多尺度并行
+
+GoogLeNet 引入了 **Inception 模块**，在同一层并行运行不同尺度的卷积（1×1、3×3、5×5）和池化，然后拼接结果。1×1 卷积用于**降维**——先压缩通道数再计算，大幅减少计算量。
+
+```python
+class InceptionModule(nn.Module):
+    """简化版 Inception 模块"""
+    def __init__(self, in_channels, out_1x1, out_3x3_reduce, out_3x3,
+                 out_5x5_reduce, out_5x5, out_pool):
+        super().__init__()
+        # 分支1: 1×1 卷积
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_1x1, 1),
+            nn.ReLU()
+        )
+        # 分支2: 1×1 → 3×3
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(in_channels, out_3x3_reduce, 1),
+            nn.ReLU(),
+            nn.Conv2d(out_3x3_reduce, out_3x3, 3, padding=1),
+            nn.ReLU()
+        )
+        # 分支3: 1×1 → 5×5
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_5x5_reduce, 1),
+            nn.ReLU(),
+            nn.Conv2d(out_5x5_reduce, out_5x5, 5, padding=2),
+            nn.ReLU()
+        )
+        # 分支4: 3×3 maxpool → 1×1
+        self.branch4 = nn.Sequential(
+            nn.MaxPool2d(3, stride=1, padding=1),
+            nn.Conv2d(in_channels, out_pool, 1),
+            nn.ReLU()
+        )
+
+    def forward(self, x):
+        b1 = self.branch1(x)
+        b2 = self.branch2(x)
+        b3 = self.branch3(x)
+        b4 = self.branch4(x)
+        return torch.cat([b1, b2, b3, b4], dim=1)
+
+# 测试 Inception 模块
+x = torch.randn(2, 192, 28, 28)
+inception = InceptionModule(192, 64, 96, 128, 16, 32, 32)
+out = inception(x)
+print("Inception 输出通道数:", out.shape[1])  # 64+128+32+32 = 256
+```
+
+**创新要点**：用全局平均池化代替全连接层（无参数），网络更深（22 层）但参数更少（~5M）。
+
+## ResNet (2015)：跳跃连接的革命
+
+当网络超过一定深度（~20 层），梯度消失导致训练反而变差——这被称为**退化问题（degradation problem）**。ResNet 通过**残差连接（skip/residual connection）**解决了这个问题，成功训练了 152 层网络。
+
+残差块的核心思想：让网络学习残差映射 $F(x)$，输出为 $F(x) + x$。当最优映射接近恒等变换时，残差映射趋近于零，网络更容易优化。
+
+```python
+class ResidualBlock(nn.Module):
+    """Basic 残差块（ResNet-18/34 使用）"""
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, 3,
+                               stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, 3,
+                               stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        # shortcut: 当尺寸或通道数变化时需 1×1 卷积调整
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1,
+                          stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += identity              # 残差连接：加法融合
+        out = F.relu(out)
+        return out
+
+# Bottleneck 残差块（ResNet-50/101/152 使用）
+class Bottleneck(nn.Module):
+    """1×1 降维 → 3×3 卷积 → 1×1 升维"""
+    expansion = 4  # 输出通道是中间通道的 4 倍
+
+    def __init__(self, in_channels, mid_channels, stride=1):
+        super().__init__()
+        out_channels = mid_channels * self.expansion
+        self.conv1 = nn.Conv2d(in_channels, mid_channels, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(mid_channels)
+        self.conv2 = nn.Conv2d(mid_channels, mid_channels, 3,
+                               stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(mid_channels)
+        self.conv3 = nn.Conv2d(mid_channels, out_channels, 1, bias=False)
+        self.bn3 = nn.BatchNorm2d(out_channels)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, 1,
+                          stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        out += identity
+        return F.relu(out)
+```
+
+**残差连接为什么有效？** 假设目标函数为 $H(x)$，残差块学习 $F(x) = H(x) - x$。即使 $F(x)$ 的梯度很小，梯度也能通过恒等映射路径 `x` 直接反向传播到浅层，避免梯度消失。
+
+## DenseNet (2017)：密集连接
+
+DenseNet 将连接发挥到极致：每一层的输入是所有前面层的输出拼接（concatenation），由此最大化特征复用和梯度流动。
+
+```python
+class DenseLayer(nn.Module):
+    """DenseNet 的基本构建块"""
+    def __init__(self, in_channels, growth_rate):
+        super().__init__()
+        self.bn1 = nn.BatchNorm2d(in_channels)
+        self.conv1 = nn.Conv2d(in_channels, 4 * growth_rate, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(4 * growth_rate)
+        self.conv2 = nn.Conv2d(4 * growth_rate, growth_rate, 3,
+                               padding=1, bias=False)
+
+    def forward(self, x):
+        out = self.conv1(F.relu(self.bn1(x)))
+        out = self.conv2(F.relu(self.bn2(out)))
+        return torch.cat([x, out], dim=1)  # 拼接，而非加法
+
+class DenseBlock(nn.Module):
+    """由多个 DenseLayer 组成"""
+    def __init__(self, num_layers, in_channels, growth_rate):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(
+                DenseLayer(in_channels + i * growth_rate, growth_rate)
+            )
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+# 测试 DenseBlock
+block = DenseBlock(num_layers=4, in_channels=64, growth_rate=32)
+x = torch.randn(2, 64, 32, 32)
+out = block(x)
+print("DenseBlock 输出通道:", out.shape[1])  # 64 + 4 * 32 = 192
+```
+
+**增长率（growth rate）** $k$ 很小（通常 12 或 32），因为通道不会冗余增长——每层增加 $k$ 个通道，最终通道数为 $C_{in} + L \times k$。
+
+## 架构演进总结
+
+| 架构 | 年份 | 层数 | 核心创新 | 关键教训 |
+|------|------|------|----------|---------|
+| LeNet-5 | 1998 | 5 | 卷积+池化+全连接范式 | CNN 范式基础 |
+| AlexNet | 2012 | 8 | ReLU, Dropout, GPU | 深度+非线性+正则化 |
+| VGG | 2014 | 16/19 | 统一 3×3 卷积 | 小核堆叠 > 大核 |
+| GoogLeNet | 2014 | 22 | Inception 模块, 1×1 降维 | 多尺度并行计算 |
+| ResNet | 2015 | 152 | 残差/跳跃连接 | 恒等捷径让深度成为可能 |
+| DenseNet | 2017 | 264 | 密集连接 | 特征复用的极限 |
+
+趋势清晰可见：**更深（5→8→19→22→152→264 层）、更多连接（顺序→残差→密集）、更好的正则化（dropout→batch norm→data augmentation）**。

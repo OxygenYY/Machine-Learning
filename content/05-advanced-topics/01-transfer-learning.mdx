@@ -1,0 +1,391 @@
+---
+title: "迁移学习：从预训练模型到自定义任务"
+description: "深入理解迁移学习的原理、特征提取与微调策略，掌握在 PyTorch 和 Hugging Face 中应用预训练模型的完整流程"
+part: "05-advanced-topics"
+order: 1
+difficulty: "advanced"
+estimatedMinutes: 35
+objectives:
+  - "理解迁移学习的核心思想：预训练模型的特征可迁移性"
+  - "掌握特征提取（Feature Extraction）与微调（Fine-tuning）的区别与适用场景"
+  - "学会冻结/解冻策略：渐进式解冻与判别式学习率"
+  - "使用 torchvision.models 进行图像迁移学习"
+  - "了解 Hugging Face Transformers 在 NLP 迁移学习中的应用"
+prerequisites: ["python-basics", "transformers-intro", "cnn-pytorch"]
+keywords: ["transfer-learning", "fine-tuning", "feature-extraction", "resnet", "pretrained-models", "huggingface"]
+---
+
+# 一、什么是迁移学习？
+
+迁移学习（Transfer Learning）的核心思想很简单：**将一个任务上学到的知识，迁移到另一个相关但不同的任务上**。在深度学习中，这通常意味着使用在大规模数据集（如 ImageNet）上预训练的模型，将其应用到你的小规模自定义任务上。
+
+形式化地说，给定源域 $\mathcal{D}_S$ 和源任务 $\mathcal{T}_S$，目标域 $\mathcal{D}_T$ 和目标任任务 $\mathcal{T}_T$，迁移学习的目标是利用从 $(\mathcal{D}_S, \mathcal{T}_S)$ 学到的知识来提升目标预测函数 $f_T(\cdot)$ 的学习效果。
+
+# 二、为什么迁移学习有效？
+
+深度卷积网络中，不同层学习到的特征具有层级性：
+
+- **浅层（前几层）**：学习通用的低级特征——边缘、颜色、纹理、角落。这些特征几乎对所有视觉任务都有用。
+- **中层**：学习更复杂的模式——形状、部件、重复结构。
+- **深层（最后几层）**：学习高度任务特定的特征——人脸、车轮、特定物体类别。
+
+浅层特征具有高度的**通用性（generality）**，这意味着在 ImageNet 上学到的边缘检测器，也可直接在医学影像或卫星图像中使用。这解释了为什么迁移学习如此强大——模型不必从头学习这些基础特征。
+
+# 三、两种主要的迁移学习方式
+
+## 特征提取（Feature Extraction）
+
+冻结预训练模型的所有卷积层（作为固定的特征提取器），只训练新添加的分类头：
+
+```python
+import torch
+import torch.nn as nn
+import torchvision.models as models
+
+# 加载预训练的 ResNet18
+model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+
+# 冻结所有卷积层参数
+for param in model.parameters():
+    param.requires_grad = False
+
+# 替换最后的全连接分类层
+num_features = model.fc.in_features
+model.fc = nn.Sequential(
+    nn.Linear(num_features, 256),
+    nn.ReLU(),
+    nn.Dropout(0.5),
+    nn.Linear(256, 10)  # 假设10个自定义类别
+)
+
+# 只有新添加的 fc 层参数需要梯度
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total_params = sum(p.numel() for p in model.parameters())
+print(f"可训练参数: {trainable_params:,} / 总参数: {total_params:,}")
+```
+
+## 微调（Fine-tuning）
+
+解冻预训练模型的部分或全部层，以较小的学习率与新分类头一起训练：
+
+```python
+# 加载预训练模型
+model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+
+# 替换分类头
+model.fc = nn.Linear(model.fc.in_features, 10)
+
+# 全部参数可训练，但使用不同的学习率分组
+optimizer = torch.optim.SGD([
+    {'params': model.fc.parameters(), 'lr': 1e-3},           # 新分类头：大学习率
+    {'params': model.layer4.parameters(), 'lr': 1e-4},       # 最后卷积层：中等学习率
+    {'params': model.layer3.parameters(), 'lr': 1e-5},       # 倒数第二层：更小
+    {'params': model.layer2.parameters(), 'lr': 1e-6},       # 浅层：最小
+], momentum=0.9, weight_decay=1e-4)
+
+print("使用了判别式学习率：浅层小，深层大")
+```
+
+# 四、层冻结策略
+
+有三种常见的层冻结策略值得掌握：
+
+**1. 全部冻结 → 特征提取**：只训练新分类头。适合目标数据集很小（<1000 张图）、且与预训练数据相似的情况。
+
+**2. 渐进式解冻（Progressive Unfreezing）**：从最后一层开始，逐层向前解冻。每次解冻一层，训练几轮，再解冻前一层：
+
+```python
+def progressive_unfreeze(model, epoch, unfreeze_every=3):
+    """每 unfreeze_every 个 epoch 解冻一个新的层组"""
+    layer_groups = [model.layer4, model.layer3, model.layer2, model.layer1]
+    num_unfrozen = min(epoch // unfreeze_every, len(layer_groups))
+
+    # 先冻结所有
+    for layer in layer_groups:
+        for param in layer.parameters():
+            param.requires_grad = False
+
+    # 从后往前解冻
+    for i in range(num_unfrozen):
+        idx = len(layer_groups) - 1 - i
+        for param in layer_groups[idx].parameters():
+            param.requires_grad = True
+
+    print(f"Epoch {epoch}: 已解冻 {num_unfrozen} 个层组")
+
+# 在训练循环中调用（示例）
+# for epoch in range(num_epochs):
+#     progressive_unfreeze(model, epoch, unfreeze_every=3)
+```
+
+**3. 判别式学习率（Discriminative Learning Rates）**：不同层使用不同的学习率。如前面代码所示，浅层使用较小的学习率（因为特征已经很好），深层和新层使用较大的学习率。
+
+# 五、torchvision 中的预训练模型
+
+PyTorch 的 `torchvision.models` 子包提供了丰富的预训练模型：
+
+```python
+import torchvision.models as models
+
+# CNN 系列
+resnet50 = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+efficientnet = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+densenet = models.densenet121(weights=models.DenseNet121_Weights.IMAGENET1K_V1)
+
+# Vision Transformer (ViT)
+vit = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_V1)
+
+print(f"ResNet50 参数量: {sum(p.numel() for p in resnet50.parameters()):,}")
+print(f"EfficientNet-B0 参数量: {sum(p.numel() for p in efficientnet.parameters()):,}")
+print(f"ViT-B/16 参数量: {sum(p.numel() for p in vit.parameters()):,}")
+```
+
+不同模型的预处理要求不同。可以使用 `weights.transforms()` 获取正确的预处理：
+
+```python
+# 获取与预训练权重匹配的预处理
+weights = models.ResNet50_Weights.IMAGENET1K_V2
+preprocess = weights.transforms()
+
+# preprocess 是一个 Compose，包含 Resize(232), CenterCrop(224), ToTensor, Normalize
+print("预处理流程:", preprocess)
+
+# 直接使用预处理
+from PIL import Image
+img = Image.open("cat.jpg")
+input_tensor = preprocess(img).unsqueeze(0)  # 添加 batch 维度
+```
+
+# 六、何时用特征提取？何时用微调？
+
+这是一个关键的决策问题。核心考量两个因素：**数据集大小**和**与预训练数据的相似度**。
+
+| 场景 | 目标数据集大小 | 与 ImageNet 相似度 | 推荐策略 |
+|------|---------------|-------------------|---------|
+| A | 小（<1K） | 高 | 特征提取（训练分类头） |
+| B | 小（<1K） | 低 | 特征提取 + 更多数据增强 |
+| C | 大（>10K） | 高 | 微调全部层（小学习率） |
+| D | 大（>10K） | 低 | 微调（或从头训练一部分） |
+
+一般原则：数据越少，应冻结的层越多；数据越不相似，越需要解开更多层进行微调。
+
+# 七、完整示例：微调 ResNet18 做猫狗分类
+
+下面是一个完整的迁移学习流程，包括数据准备、模型构建、训练和评估：
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms, models
+from sklearn.metrics import accuracy_score, confusion_matrix
+import numpy as np
+
+# ---- 1. 数据预处理 ----
+# 训练数据使用数据增强，验证数据只做必要的预处理
+train_transform = transforms.Compose([
+    transforms.RandomResizedCrop(224),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.RandomRotation(15),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
+
+val_transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+])
+
+# 假设数据结构: data/train/cats, data/train/dogs, data/val/...
+# train_dataset = datasets.ImageFolder("data/train", transform=train_transform)
+# val_dataset = datasets.ImageFolder("data/val", transform=val_transform)
+# train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=2)
+# val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=2)
+
+# ---- 2. 模型构建 ----
+def build_model(num_classes=2, freeze_backbone=True):
+    model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
+
+    if freeze_backbone:
+        for param in model.parameters():
+            param.requires_grad = False
+
+    # 替换分类头
+    model.fc = nn.Sequential(
+        nn.Dropout(0.3),
+        nn.Linear(model.fc.in_features, 512),
+        nn.ReLU(),
+        nn.Dropout(0.3),
+        nn.Linear(512, num_classes)
+    )
+    return model
+
+model = build_model(num_classes=2, freeze_backbone=False)
+
+# ---- 3. 判别式学习率 ----
+def get_optimizer(model, base_lr=1e-4):
+    return optim.AdamW([
+        {'params': model.fc.parameters(), 'lr': base_lr * 10},
+        {'params': model.layer4.parameters(), 'lr': base_lr},
+        {'params': model.layer3.parameters(), 'lr': base_lr * 0.1},
+        {'params': model.layer2.parameters(), 'lr': base_lr * 0.01},
+        {'params': model.layer1.parameters(), 'lr': base_lr * 0.001},
+    ], weight_decay=1e-4)
+
+optimizer = get_optimizer(model)
+criterion = nn.CrossEntropyLoss()
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=20)
+
+# ---- 4. 训练循环 ----
+def train_one_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+
+        # 梯度裁剪，防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        running_loss += loss.item() * images.size(0)
+        _, predicted = outputs.max(1)
+        correct += predicted.eq(labels).sum().item()
+        total += labels.size(0)
+
+    return running_loss / total, correct / total
+
+# ---- 5. 评估函数 ----
+@torch.no_grad()
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for images, labels in loader:
+        images, labels = images.to(device), labels.to(device)
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+
+        running_loss += loss.item() * images.size(0)
+        _, predicted = outputs.max(1)
+        correct += predicted.eq(labels).sum().item()
+        total += labels.size(0)
+
+    return running_loss / total, correct / total
+
+# ---- 6. 主训练循环 ----
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+num_epochs = 20
+
+print(f"设备: {device}")
+print(f"可训练参数: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
+for epoch in range(num_epochs):
+    # 实际运行时需要真实的数据加载器
+    # train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
+    # val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+    # scheduler.step()
+    # print(f"Epoch {epoch+1:2d}/{num_epochs} | "
+    #       f"Train Loss: {train_loss:.4f} Acc: {train_acc:.3f} | "
+    #       f"Val Loss: {val_loss:.4f} Acc: {val_acc:.3f}")
+    pass
+
+print("训练完成!")
+```
+
+# 八、Hugging Face Transformers 中的 NLP 迁移学习
+
+在 NLP 领域，迁移学习主要通过 Hugging Face 的 Transformers 库实现。BERT、GPT 等模型在大量文本上预训练，可微调到各种下游任务：
+
+```python
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    Trainer,
+    TrainingArguments
+)
+import torch
+
+# ---- 加载预训练模型和分词器 ----
+model_name = "bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSequenceClassification.from_pretrained(
+    model_name,
+    num_labels=2  # 二分类
+)
+
+# ---- 分词示例 ----
+texts = ["This movie is great!", "I didn't like this film."]
+labels = [1, 0]
+
+tokens = tokenizer(
+    texts,
+    padding=True,           # 填充到 batch 内最大长度
+    truncation=True,        # 截断超过 max_length 的部分
+    max_length=128,
+    return_tensors="pt"     # 返回 PyTorch 张量
+)
+
+print("input_ids 形状:", tokens["input_ids"].shape)
+print("attention_mask 形状:", tokens["attention_mask"].shape)
+
+# ---- 冻结 BERT 主体，只训练分类头 ----
+for name, param in model.base_model.named_parameters():
+    param.requires_grad = False
+
+# 解冻最后两层 encoder
+for name, param in model.base_model.encoder.layer[-2:].named_parameters():
+    param.requires_grad = True
+
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"\n可训练参数: {trainable:,}")
+
+# ---- 训练配置 ----
+# training_args = TrainingArguments(
+#     output_dir="./results",
+#     num_train_epochs=3,
+#     per_device_train_batch_size=16,
+#     per_device_eval_batch_size=32,
+#     evaluation_strategy="epoch",
+#     save_strategy="epoch",
+#     logging_steps=50,
+#     learning_rate=2e-5,
+#     warmup_ratio=0.1,
+#     weight_decay=0.01,
+#     load_best_model_at_end=True,
+# )
+# trainer = Trainer(model=model, args=training_args, ...)
+# trainer.train()
+```
+
+# 九、迁移学习的最佳实践
+
+1. **数据预处理必须匹配预训练模型**：ImageNet 模型的归一化均值和标准差是固定的，必须使用 `mean=[0.485, 0.456, 0.406]` 和 `std=[0.229, 0.224, 0.225]`。输入尺寸也应匹配（通常 224×224）。
+
+2. **从小学习率开始**：微调时学习率通常比从头训练小 10~100 倍。典型值：SGD 的 lr=1e-3 ~ 1e-4，Adam 的 lr=1e-4 ~ 1e-5。
+
+3. **使用学习率预热（Warmup）**：训练开始时，学习率从很小线性增长到目标值，避免初期参数被大幅破坏。
+
+4. **监控过拟合**：当目标数据集很小时，微调容易过拟合。使用强正则化（Dropout, Weight Decay）并尽早验证。
+
+5. **考虑使用预训练模型的其他部分**：不仅可以使用分类模型的主干网络，目标检测、分割等任务也有丰富的预训练模型生态。
+
+## 总结
+
+迁移学习是现代深度学习的核心范式之一。在大模型时代，几乎没有人从头训练视觉或语言模型——从预训练权重出发，仅在目标数据上微调，既节省计算资源，又能在小数据量下获得优异性能。理解特征提取与微调的区别、掌握层冻结策略和判别式学习率，是每个深度学习实践者的必备技能。

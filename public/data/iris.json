@@ -1,0 +1,10 @@
+{
+  "name": "Iris Flower Dataset",
+  "description": "经典的鸢尾花分类数据集，包含 3 个类别各 50 个样本。用于演示多分类、PCA 可视化和模型评估。",
+  "source": "https://archive.ics.uci.edu/dataset/53/iris",
+  "features": ["sepal_length", "sepal_width", "petal_length", "petal_width"],
+  "target": "species",
+  "classes": ["setosa", "versicolor", "virginica"],
+  "num_samples": 150,
+  "num_features": 4
+}

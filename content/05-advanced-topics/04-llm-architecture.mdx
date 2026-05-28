@@ -1,0 +1,403 @@
+---
+title: "大语言模型（LLM）架构原理"
+description: "从 GPT 架构到 RLHF，全面理解大语言模型的预训练、微调和对齐流程"
+part: "05-advanced-topics"
+order: 4
+difficulty: "advanced"
+estimatedMinutes: 45
+objectives:
+  - "理解 GPT 风格 decoder-only Transformer 架构"
+  - "掌握 LLM 的训练三阶段：预训练 → 指令微调 → RLHF"
+  - "了解主流分词方法：BPE、WordPiece、SentencePiece"
+  - "理解 Chinchilla 缩放定律的实践含义"
+  - "认识主流开源 LLM 生态及局限性"
+prerequisites: ["python-basics", "transformers-intro"]
+keywords: ["LLM", "GPT", "transformer", "RLHF", "tokenization", "scaling-laws", "causal-lm"]
+---
+
+# 一、什么是大语言模型？
+
+大语言模型（Large Language Model, LLM）是建立在 Transformer 架构上的超大规模神经网络，通过在海量文本上做自监督预训练，获得强大的语言理解和生成能力。"大"体现在三个方面：
+
+- **参数量大**：从 7B（70 亿）到 1T（万亿）级别
+- **训练数据大**：TB 乃至 PB 级的文本语料
+- **计算量大**：需要数千 GPU 训练数周到数月
+
+现代 LLM 的核心架构是 **decoder-only Transformer**——只使用 Transformer 的解码器部分，通过因果自注意力（Causal Self-Attention）实现自回归生成。
+
+# 二、GPT 架构：Decoder-Only Transformer
+
+GPT（Generative Pre-trained Transformer）使用纯解码器架构，每一层由两个核心组件构成：
+
+1. **掩码多头自注意力（Masked Multi-Head Self-Attention）**：因果掩码确保 token $t$ 只能关注 token $1$ 到 $t$
+2. **前馈神经网络（Feed-Forward Network, FFN）**：通常用 SwiGLU 或 GELU 激活
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class CausalSelfAttention(nn.Module):
+    """GPT 中使用的因果自注意力"""
+    def __init__(self, d_model, n_heads, max_seq_len=1024, dropout=0.1):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+
+        # Q, K, V 在同一个矩阵中计算
+        self.qkv = nn.Linear(d_model, 3 * d_model)
+        self.proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        # 因果掩码缓存
+        self.register_buffer(
+            "causal_mask",
+            torch.tril(torch.ones(max_seq_len, max_seq_len))
+            .view(1, 1, max_seq_len, max_seq_len)
+        )
+
+    def forward(self, x):
+        B, T, C = x.shape
+
+        # 一次计算出所有 Q, K, V
+        qkv = self.qkv(x)  # (B, T, 3*C)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        # 拆分为多头
+        q = q.view(B, T, self.n_heads, self.d_k).transpose(1, 2)  # (B, H, T, d_k)
+        k = k.view(B, T, self.n_heads, self.d_k).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.d_k).transpose(1, 2)
+
+        # 缩放点积注意力 + 因果掩码
+        attn_scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_k)
+        attn_scores = attn_scores.masked_fill(
+            self.causal_mask[:, :, :T, :T] == 0, float('-inf')
+        )
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # 加权求和
+        out = attn_weights @ v  # (B, H, T, d_k)
+        out = out.transpose(1, 2).contiguous().view(B, T, C)
+        out = self.proj(out)
+        return out
+
+
+class GPTBlock(nn.Module):
+    """GPT 的一个 Transformer 层"""
+    def __init__(self, d_model, n_heads, ffn_dim, dropout=0.1):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.attn = CausalSelfAttention(d_model, n_heads, dropout=dropout)
+        self.ln2 = nn.LayerNorm(d_model)
+
+        # FFN: 使用 GELU 激活
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, ffn_dim),
+            nn.GELU(),
+            nn.Linear(ffn_dim, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        # Pre-LN 架构（先 LayerNorm 再做操作）
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ffn(self.ln2(x))
+        return x
+
+
+class MiniGPT(nn.Module):
+    """一个简化的 GPT 模型，用于理解架构"""
+    def __init__(self, vocab_size, d_model=512, n_heads=8, n_layers=6,
+                 ffn_dim=2048, max_seq_len=1024, dropout=0.1):
+        super().__init__()
+
+        # Token 嵌入
+        self.token_embed = nn.Embedding(vocab_size, d_model)
+        # 可学习的位置嵌入
+        self.pos_embed = nn.Embedding(max_seq_len, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+        # Transformer 层堆叠
+        self.layers = nn.ModuleList([
+            GPTBlock(d_model, n_heads, ffn_dim, dropout)
+            for _ in range(n_layers)
+        ])
+
+        self.ln_final = nn.LayerNorm(d_model)
+        # 输出投影：从隐藏状态映射回词表大小
+        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+
+        # 权重绑定：token embed 和 lm_head 共享权重
+        self.token_embed.weight = self.lm_head.weight
+
+        # 初始化
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, input_ids):
+        B, T = input_ids.shape
+
+        # Token 嵌入 + 位置嵌入
+        positions = torch.arange(0, T, device=input_ids.device).unsqueeze(0)
+        x = self.token_embed(input_ids) + self.pos_embed(positions)
+        x = self.dropout(x)
+
+        # 经过所有 Transformer 层
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.ln_final(x)
+        logits = self.lm_head(x)  # (B, T, vocab_size)
+
+        return logits
+
+    def generate(self, input_ids, max_new_tokens=50, temperature=1.0, top_k=50):
+        """简单的自回归生成"""
+        self.eval()
+        for _ in range(max_new_tokens):
+            # 截断过长序列
+            cropped = input_ids[:, -1024:] if input_ids.size(1) > 1024 else input_ids
+
+            with torch.no_grad():
+                logits = self(cropped)
+                logits = logits[:, -1, :] / temperature  # 只取最后一个位置的 logits
+
+                # Top-K 采样
+                if top_k > 0:
+                    top_k_values, _ = torch.topk(logits, top_k, dim=-1)
+                    min_top_k = top_k_values[:, -1].unsqueeze(-1)
+                    logits[logits < min_top_k] = float('-inf')
+
+                probs = F.softmax(logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+        return input_ids
+
+
+# 测试 MiniGPT
+vocab_size = 10000
+model = MiniGPT(vocab_size=vocab_size)
+print(f"MiniGPT 参数量: {sum(p.numel() for p in model.parameters()):,}")
+
+dummy_input = torch.randint(0, vocab_size, (2, 64))
+logits = model(dummy_input)
+print(f"输入: {dummy_input.shape} → 输出: {logits.shape}")  # (2, 64, 10000)
+```
+
+# 三、预训练目标：因果语言建模
+
+LLM 的预训练使用**因果语言建模（Causal Language Modeling, CLM）**——也称为"下一个 Token 预测"：
+
+给定 tokens $\mathbf{x} = (x_1, x_2, \ldots, x_n)$，模型学习预测每个位置的下一个 token。损失函数为交叉熵：
+
+$$
+\mathcal{L}(\theta) = -\sum_{t=1}^{n-1} \log P_\theta(x_{t+1} \mid x_1, \ldots, x_t)
+$$
+
+这个看似简单的任务极其强大：要准确预测下一个词，模型必须学习语法、语义、推理和世界知识。
+
+```python
+def compute_causal_lm_loss(model, input_ids):
+    """
+    计算因果语言建模损失
+    input_ids: (batch, seq_len)
+    """
+    logits = model(input_ids)  # (batch, seq_len, vocab_size)
+
+    # 移位对齐：用前 t 个 token 预测第 t+1 个 token
+    shift_logits = logits[:, :-1, :].contiguous()
+    shift_labels = input_ids[:, 1:].contiguous()
+
+    # Flatten 后计算交叉熵
+    loss = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+        ignore_index=-100  # 忽略填充位置
+    )
+    return loss
+
+# 测试
+loss = compute_causal_lm_loss(model, dummy_input)
+print(f"预训练损失: {loss.item():.4f}")
+print(f"困惑度（Perplexity）: {math.exp(loss.item()):.2f}")
+```
+
+# 四、分词（Tokenization）
+
+LLM 不能直接理解文本，需要将文本转换为 token ID 序列。现代 LLM 使用子词（subword）分词：
+
+- **BPE (Byte-Pair Encoding)**：GPT 系列使用。从字符级别开始，迭代合频繁共现的字符对
+- **WordPiece**：BERT 使用。基于似然的合并策略
+- **SentencePiece**：Llama、Mistral 使用。直接在原始文本（byte-level）上训练，语言无关
+
+```python
+# 使用 Hugging Face tokenizers（需要安装: pip install tokenizers）
+# --- 以下展示 BPE 的原理和效果 ---
+from transformers import AutoTokenizer
+
+# 加载不同模型的分词器，对比 token 化结果
+models_to_compare = [
+    "gpt2",                    # GPT-2 BPE
+    "bert-base-uncased",       # BERT WordPiece
+    "meta-llama/Llama-2-7b-hf",  # Llama SentencePiece
+]
+
+text = "The transformer architecture revolutionized natural language processing."
+
+print("不同分词器的 token 化结果:")
+# 前两个模型直接测试
+for model_name in ["gpt2", "bert-base-uncased"]:
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokens = tokenizer.tokenize(text)
+    ids = tokenizer.encode(text)
+    print(f"\n{model_name}:")
+    print(f"  Tokens: {tokens}")
+    print(f"  Token IDs: {ids}")
+    print(f"  Token 数量: {len(tokens)}")
+```
+
+# 五、缩放定律（Scaling Laws）
+
+Chinchilla 论文（Hoffmann et al., 2022）提出了现代 LLM 训练的黄金法则：
+
+> **对于给定的计算预算 $C$，最优的模型参数量 $N$ 和训练 Token 数 $D$ 应近似满足 $N \propto C^{0.5}$ 和 $D \propto C^{0.5}$**
+
+换句话说，模型大小和训练数据量应该**同步增长**。Chinchilla 论文发现之前的许多大模型（如 GPT-3）是"训练不足"的——参数量很大，但训练 token 数相对不足。
+
+实用结论：
+- 一个 70B 参数的模型，大约需要 1.4T（1.4 万亿）token 来"最优"训练
+- 如果只有少量数据，把模型做小比把模型做大（然后训练不足）更明智
+
+```python
+# Chinchilla 缩放定律的可视化计算
+def optimal_model_size(compute_budget_flops, k=0.5):
+    """根据计算预算估算最优模型参数量"""
+    # 这是一个粗略估计；实际关系更复杂
+    # 经验法则: compute ≈ 6 * N * D
+    # 最优时: N ≈ D
+    N_optimal = (compute_budget_flops / 6) ** k
+    return N_optimal
+
+# 不同计算预算下的最优参数量
+compute_levels = [1e18, 1e20, 1e22, 1e23, 1e24]  # FLOPs
+print("计算预算 (FLOPs)  →  最优参数量")
+for c in compute_levels:
+    n = optimal_model_size(c)
+    unit = "B"
+    if n > 1e9:
+        n = n / 1e9; unit = "B"
+    elif n > 1e6:
+        n = n / 1e6; unit = "M"
+    print(f"  {c:.0e}          →  {n:.1f}{unit}")
+```
+
+# 六、LLM 训练三阶段
+
+现代 LLM 的训练通常包含三个阶段：
+
+```
+大规模文本语料 → [1] 预训练 (Pre-training)
+                  ↓ 基座模型 (Base Model)
+高质量指令数据 → [2] 指令微调 (Instruction Tuning / SFT)
+                  ↓ 监督微调模型 (SFT Model)
+人类偏好数据 →   [3] RLHF (人类反馈强化学习)
+                  ↓ 对齐模型 (Aligned Model / Chat Model)
+```
+
+**阶段 1 - 预训练**：在海量互联网文本上做因果语言建模。代价极高，通常只有少数机构能承担。产出"基座模型"（Base Model）。
+
+**阶段 2 - 指令微调（SFT）**：用高质量的（指令，回复）对进行有监督微调。教会模型遵循指令格式。数据量远小于预训练（通常几万到几十万条）。
+
+**阶段 3 - RLHF**：
+1. 收集人类对模型回复的偏好比较数据
+2. 训练奖励模型（Reward Model）来模拟人类偏好
+3. 使用 PPO 算法优化 LLM，最大化奖励模型的评分，同时用 KL 散度约束防止偏离 SFT 模型太远
+
+# 七、RLHF 简介
+
+RLHF 的优化目标可写为：
+
+$$
+\max_\theta \ \mathbb{E}_{x \sim \mathcal{D}, y \sim \pi_\theta(\cdot|x)} \left[ r_\phi(x, y) - \beta \cdot \text{KL}\left(\pi_\theta(\cdot|x) \parallel \pi_{\text{SFT}}(\cdot|x)\right) \right]
+$$
+
+其中 $\pi_\theta$ 是待优化的策略（LLM），$r_\phi$ 是奖励模型，$\pi_{\text{SFT}}$ 是 SFT 模型（用于 KL 正则化），$\beta$ 控制惩罚强度。
+
+```python
+# RLHF 核心概念的简化代码示例
+def compute_rlhf_loss(policy_logprobs, sft_logprobs, rewards, advantages, beta=0.1):
+    """
+    简化的 PPO 损失计算（说明性代码）
+
+    policy_logprobs: 当前策略（LLM）对生成 token 的对数概率
+    sft_logprobs:    SFT 模型的对数概率
+    rewards:         奖励模型给出的分数
+    advantages:      优势函数估计（通常用 GAE）
+    beta:            KL 惩罚系数
+    """
+    # 策略梯度损失
+    pg_loss = -(advantages * policy_logprobs).mean()
+
+    # KL 惩罚：防止偏离 SFT 模型太远
+    kl_div = (policy_logprobs - sft_logprobs).sum(dim=-1).mean()
+    kl_penalty = beta * kl_div
+
+    # 总 RLHF 损失
+    total_loss = pg_loss + kl_penalty
+    return total_loss, pg_loss.item(), kl_div.item()
+
+
+# 演示：RLHF 将减少有害输出，提升有用性
+# 实际实现依赖完整的 PPO 训练循环和一个奖励模型
+```
+
+# 八、主流 LLM 生态
+
+| 模型 | 参数量 | 开源 | 特点 |
+|------|--------|------|------|
+| GPT-4 | 未公布 (~1.7T 估计) | 否 | 多模态，强大推理能力 |
+| Claude | 未公布 | 否 | 安全对齐，长上下文 |
+| Llama 3 | 8B / 70B / 405B | 是 | Meta 开源，生态丰富 |
+| Mistral / Mixtral | 7B / 8x7B (MoE) | 是 | 高效架构，性能优异 |
+| DeepSeek-V2/V3 | 236B (21B 激活, MoE) | 是 | MLA 注意力，成本极低 |
+| Qwen 2.5 | 0.5B ~ 72B | 是 | 阿里开源，中文优秀 |
+
+# 九、LLM 的局限性
+
+1. **幻觉（Hallucination）**：LLM 会生成听起来合理但事实错误的内容。根本原因是语言建模目标只优化"似然性"而非"真实性"
+2. **上下文长度限制**：虽然已经从 2K 拓展到 128K+，但注意力机制的 $O(n^2)$ 复杂度仍然是扩展的根本障碍
+3. **推理能力不足**：在需要多步骤逻辑推理的任务上表现不佳，尤其是在数学和符号推理领域（虽然 CoT prompting 部分缓解）
+4. **时效性**：知识截止于训练数据的时间点，无法获取最新信息（除非结合 RAG 检索增强生成）
+5. **成本**：推理和部署大模型的成本高昂，限制了实时性和普惠性
+
+```python
+# 演示：LLM 的幻觉问题（说明性示例）
+# LLM 倾向于对不知道的事"编造"答案，而不是承认不知道
+# 
+# 提示词: "谁是第一位登上火星的中国人？"
+# 幻觉回答: "李明（化名）于 2035 年乘坐长征十号..."
+# 正确回答: 截至 2024 年，尚无中国人登上火星
+```
+
+## 总结
+
+| 阶段 | 目标 | 数据规模 | 计算需求 |
+|------|------|---------|---------|
+| 预训练 | 学习语言和知识 | TB~PB 级 | 数千 GPU·月 |
+| 指令微调 | 学会遵循指令 | 数万~数十万条 | 数 GPU·天 |
+| RLHF | 与人类偏好对齐 | 数万~数十万条 | 数十 GPU·天 |
+
+理解 LLM 的架构、训练流程和局限性，是有效使用和进一步研究大语言模型的基础。在下一课中，我们将动手实践如何使用和微调预训练 LLM。

@@ -1,0 +1,496 @@
+---
+title: "MLOps：机器学习的 DevOps"
+description: "掌握 MLOps 核心实践：实验跟踪、模型注册、数据版本管理、CI/CD 流水线与生产监控"
+part: "06-practical-skills"
+order: 7
+difficulty: "advanced"
+estimatedMinutes: 40
+objectives:
+  - "理解 MLOps 的核心概念：为什么 ML 项目需要专门的运维实践"
+  - "使用 wandb 或 MLflow 进行实验跟踪"
+  - "了解模型注册中心的作用与使用方法"
+  - "理解 CI/CD 在 ML 中的应用模式"
+  - "掌握数据版本管理（DVC）的基本用法"
+  - "了解生产环境中数据漂移和模型漂移的监控方法"
+prerequisites: ["python-basics", "training-dnn", "deployment-api"]
+keywords: ["mlops", "experiment-tracking", "wandb", "mlflow", "data-versioning", "model-monitoring"]
+---
+
+# 一、MLOps：不是"加上 DevOps 就行"
+
+传统的 DevOps 解决的是代码部署的问题：代码写好 → 测试 → 部署。但 ML 系统有**三个额外维度**的变化来源：
+
+1. **代码**（模型架构、训练脚本）—— DevOps 已经解决
+2. **数据**（分布变化、新类别、数据质量问题）
+3. **模型**（权重、超参数、训练时随机性）
+
+MLOps 就是系统化地管理这三个维度的实践。
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import random
+```
+
+# 二、实验跟踪（Experiment Tracking）
+
+## 2.1 为什么需要实验跟踪？
+
+想象一下这个场景：你在跑第 47 组超参数组合，突然意识到第 23 组的结果"好像"更好——但你已经不记得第 23 组的具体参数是什么了。
+
+```python
+# 没有实验跟踪时，你可能这样记录（糟糕的做法）：
+# lr=0.001, bs=64, epochs=50 -> val_acc=0.87  ← 记在 Slack 里
+# lr=0.01, bs=32, epochs=100 -> val_acc=0.89 ← 记在 Notion 里
+# lr=0.005, bs=128, epochs=80 -> val_acc=0.91 ← 记在脑子里...
+
+# 有实验跟踪时：所有信息自动记录，可查询、可对比
+```
+
+## 2.2 集成 Weights & Biases (wandb)
+
+wandb 是目前最流行的实验跟踪工具之一，只需几行代码就能集成为 PyTorch 训练循环。
+
+```python
+# 演示代码——实际使用时先 pip install wandb && wandb login
+def train_with_wandb_demo():
+    """集成 wandb 的训练循环示例"""
+    # 模拟导入（实际使用去掉注释）
+    # import wandb
+
+    # 初始化一个 run
+    config = {
+        "learning_rate": 0.001,
+        "batch_size": 64,
+        "epochs": 20,
+        "hidden_size": 128,
+        "dropout": 0.3,
+        "optimizer": "Adam",
+        "architecture": "MLP-3Layer",
+        "dataset": "CIFAR-10",
+        "data_augmentation": True,
+    }
+    # wandb.init(project="ml-course", name="exp-001", config=config)
+
+    # 准备数据
+    X = torch.randn(1000, 20)
+    y = torch.randint(0, 3, (1000,))
+    dataset = TensorDataset(X, y)
+    train_loader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+    # 构建模型
+    model = nn.Sequential(
+        nn.Linear(20, 128), nn.ReLU(), nn.Dropout(0.3),
+        nn.Linear(128, 64), nn.ReLU(),
+        nn.Linear(64, 3)
+    )
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    # 训练循环（带 wandb 日志记录）
+    for epoch in range(20):
+        epoch_loss = 0
+        correct, total = 0, 0
+
+        model.train()
+        for batch_X, batch_y in train_loader:
+            optimizer.zero_grad()
+            outputs = model(batch_X)
+            loss = criterion(outputs, batch_y)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+            correct += (outputs.argmax(1) == batch_y).sum().item()
+            total += batch_y.size(0)
+
+        accuracy = correct / total
+
+        # 记录到 wandb
+        # wandb.log({
+        #     "epoch": epoch,
+        #     "train_loss": epoch_loss / len(train_loader),
+        #     "train_accuracy": accuracy,
+        #     "learning_rate": optimizer.param_groups[0]['lr'],
+        # })
+
+        # 计算并记录梯度范数
+        total_grad_norm = 0.0
+        for p in model.parameters():
+            if p.grad is not None:
+                total_grad_norm += p.grad.data.norm(2).item() ** 2
+        total_grad_norm = total_grad_norm ** 0.5
+
+        # wandb.log({"gradient_norm": total_grad_norm})
+
+    # 保存模型作为 artifact
+    # artifact = wandb.Artifact("model", type="model")
+    # torch.save(model.state_dict(), "model.pt")
+    # artifact.add_file("model.pt")
+    # wandb.log_artifact(artifact)
+
+    # wandb.finish()
+    print("wandb run 已完成（演示模式）")
+
+train_with_wandb_demo()
+```
+
+**实验跟踪应该记录的内容**：
+
+| 类别 | 具体内容 |
+|------|----------|
+| 超参数 | lr, batch_size, epochs, dropout, optimizer, weight_decay... |
+| 指标 | train_loss, val_loss, accuracy, F1, AUC 等每个 epoch 的值 |
+| 代码 | git commit hash, 分支名, 文件是否干净 |
+| 数据 | 数据集版本, 划分种子, 数据增强策略 |
+| 环境 | Python 版本, PyTorch 版本, CUDA 版本, 包列表 |
+| 资源 | GPU 型号, 显存使用, 训练时间 |
+| 产出 | 模型文件, 混淆矩阵图片, ROC 曲线等 |
+
+# 三、可复现性
+
+模型训练中有太多随机源。要确保结果可以复现，必须系统化地控制它们：
+
+```python
+def set_seed_everywhere(seed=42):
+    """最大限度地保证可复现性"""
+    import random
+    import numpy as np
+    import torch
+    import os
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # 使 CuDNN 的行为确定化（可能会减慢训练）
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # 设置环境变量
+    os.environ['PYTHONHASHSEED'] = str(seed)
+
+    print(f"所有随机种子已设置为 {seed}")
+    print("cudnn.deterministic = True (可能略微减慢训练)")
+
+# 在训练脚本开头调用
+set_seed_everywhere(42)
+
+# 验证
+a = torch.randn(3, 3)
+b = torch.randn(3, 3)
+print(f"固定种子后的随机张量:\n{a}")
+```
+
+# 四、模型注册中心（Model Registry）
+
+模型注册中心是 ML 系统的"图书馆"——它管理所有已训练模型的版本、元数据和部署状态。
+
+```python
+# MLflow Model Registry 概念示例
+class ModelRegistryConcept:
+    """
+    模型注册中心的职责:
+    - 版本管理: model-v1, model-v2, ...
+    - 阶段管理: Staging → Production → Archived
+    - 元数据: 训练数据版本、评估指标、作者、部署时间
+    - 访问控制: 谁可以将模型推到生产环境？
+    """
+
+    def __init__(self):
+        self.models = {}
+
+    def register(self, name, version, metrics, artifacts):
+        """注册一个新模型版本"""
+        if name not in self.models:
+            self.models[name] = []
+        self.models[name].append({
+            'version': version,
+            'stage': 'staging',
+            'metrics': metrics,
+            'artifacts': artifacts,
+            'timestamp': np.datetime64('now')
+        })
+        print(f"模型 {name} v{version} 已注册 (Stage: staging)")
+
+    def promote(self, name, version, to_stage='production'):
+        """将模型提升到指定阶段"""
+        for m in self.models.get(name, []):
+            if m['version'] == version:
+                m['stage'] = to_stage
+                print(f"模型 {name} v{version} → {to_stage}")
+                return
+        print(f"模型 {name} v{version} 未找到")
+
+    def get_production_model(self, name):
+        """获取生产环境中的模型"""
+        for m in self.models.get(name, []):
+            if m['stage'] == 'production':
+                return m
+        return None
+
+# 演示
+registry = ModelRegistryConcept()
+registry.register("image-classifier", version=1,
+                  metrics={"accuracy": 0.92, "f1": 0.91},
+                  artifacts=["model.pt"])
+registry.register("image-classifier", version=2,
+                  metrics={"accuracy": 0.94, "f1": 0.93},
+                  artifacts=["model_v2.pt"])
+registry.promote("image-classifier", version=1, to_stage='production')
+print(f"\n当前生产模型: {registry.get_production_model('image-classifier')}")
+```
+
+# 五、数据版本管理（DVC）
+
+数据是 ML 项目的核心资产，但 Git 不适合管理大型数据集。DVC（Data Version Control）解决了这个问题。
+
+```bash
+# DVC 基本工作流（在终端中执行）
+# pip install dvc
+
+# 1. 初始化 DVC
+# dvc init
+# git commit -m "Initialize DVC"
+
+# 2. 追踪数据文件
+# dvc add data/train.csv data/test.csv
+# git add data/.gitignore data/train.csv.dvc data/test.csv.dvc
+# git commit -m "Add training data v1"
+
+# 3. 配置远程存储（S3/GCS/Azure/local）
+# dvc remote add -d myremote s3://my-bucket/dvc-store
+# dvc push
+
+# 4. 切换数据版本
+# git checkout <old-commit>  # 切换到旧代码
+# dvc checkout               # 恢复对应的数据版本
+```
+
+**核心概念**：Git 管理 `.dvc` 元文件（很小），DVC 管理实际数据文件（很大）。代码和数据版本始终同步。
+
+# 六、CI/CD for ML
+
+ML 的 CI/CD 比传统软件多了几个步骤：
+
+```
+          ┌─────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+  Push ──▶│ CI Test │──▶  │  Train   │──▶  │ Evaluate │──▶  │ Deploy   │
+  Code    │ (lint,  │     │  Model   │     │  Model   │     │  Model   │
+          │  unit)  │     │          │     │          │     │          │
+          └─────────┘     └──────────┘     └──────────┘     └──────────┘
+                                │                 │
+                                ▼                 ▼
+                          数据验证            模型验证门
+                          (schema, stats)    (accuracy > threshold?)
+```
+
+```python
+# ML CI/CD 中的模型验证门示例
+def model_validation_gate(new_model_metrics, production_model_metrics=None):
+    """
+    判断新模型是否可以部署到生产环境
+    每个组织应根据自身需求定义验证规则
+    """
+    checks = []
+
+    # 检查 1: 基本性能门槛
+    checks.append(("准确率 >= 0.90",
+                   new_model_metrics.get('accuracy', 0) >= 0.90))
+
+    # 检查 2: 不比生产模型差
+    if production_model_metrics:
+        prod_acc = production_model_metrics.get('accuracy', 0)
+        checks.append((f"优于生产模型 ({prod_acc:.4f})",
+                       new_model_metrics.get('accuracy', 0) >= prod_acc))
+
+    # 检查 3: 各类别性能均衡
+    per_class_acc = new_model_metrics.get('per_class_accuracy', [])
+    if per_class_acc:
+        min_class_acc = min(per_class_acc)
+        checks.append((f"最差类别准确率 >= 0.80 (当前: {min_class_acc:.4f})",
+                       min_class_acc >= 0.80))
+
+    # 检查 4: 推理延迟
+    checks.append(("推理延迟 <= 50ms",
+                   new_model_metrics.get('latency_ms', 0) <= 50))
+
+    # 汇总
+    print("=" * 50)
+    print("模型验证门检查:")
+    all_passed = True
+    for description, passed in checks:
+        status = "通过" if passed else "未通过"
+        print(f"  [{status}] {description}")
+        all_passed = all_passed and passed
+
+    if all_passed:
+        print("\n所有检查通过 → 可以部署到生产环境!")
+    else:
+        print("\n部分检查未通过 → 模型需要改进后才能部署...")
+    return all_passed
+
+
+# 演示
+new_metrics = {
+    'accuracy': 0.935,
+    'per_class_accuracy': [0.95, 0.92, 0.94, 0.88],
+    'latency_ms': 35
+}
+prod_metrics = {'accuracy': 0.921}
+
+model_validation_gate(new_metrics, prod_metrics)
+```
+
+# 七、生产环境监控
+
+模型部署后不是就万事大吉了。现实世界的分布变化会导致模型性能退化。
+
+## 7.1 数据漂移（Data Drift）
+
+```python
+def detect_data_drift(reference_data, current_data, threshold=0.1):
+    """
+    使用简单的统计检验检测数据漂移
+    实际生产中使用 KS 检验、PSI (Population Stability Index) 等
+    """
+    ref_mean = reference_data.mean(axis=0)
+    ref_std = reference_data.std(axis=0) + 1e-8
+    cur_mean = current_data.mean(axis=0)
+
+    # 计算标准化均值偏移
+    z_score = np.abs((cur_mean - ref_mean) / (ref_std / np.sqrt(len(current_data))))
+    # PSI (Population Stability Index) 简化版
+    psi_per_feature = []
+
+    for i in range(reference_data.shape[1]):
+        # 分桶比较分布
+        ref_hist, bins = np.histogram(reference_data[:, i], bins=10)
+        cur_hist, _ = np.histogram(current_data[:, i], bins=bins)
+
+        ref_pct = ref_hist / ref_hist.sum()
+        cur_pct = cur_hist / cur_hist.sum()
+
+        # PSI 公式
+        epsilon = 1e-10
+        psi = np.sum((cur_pct - ref_pct) * np.log((cur_pct + epsilon) / (ref_pct + epsilon)))
+        psi_per_feature.append(psi)
+
+    drifted_features = [i for i, psi in enumerate(psi_per_feature) if psi > threshold]
+    has_drift = len(drifted_features) > 0
+
+    print(f"特征总数: {reference_data.shape[1]}")
+    print(f"漂移特征数: {len(drifted_features)} (PSI > {threshold})")
+    if drifted_features:
+        print(f"漂移特征索引: {drifted_features}")
+    print(f"数据漂移检测: {'警报! 检测到漂移' if has_drift else '未检测到漂移'}")
+
+    return has_drift, psi_per_feature
+
+
+# 模拟漂移数据
+np.random.seed(42)
+ref_data = np.random.randn(1000, 5)  # 参考分布（训练时的数据分布）
+cur_data_normal = np.random.randn(1000, 5)  # 正常，分布未变
+cur_data_drifted = np.random.randn(1000, 5) + 0.5  # 均值整体偏移
+
+print("=== 无漂移的情况 ===")
+detect_data_drift(ref_data, cur_data_normal)
+
+print("\n=== 有漂移的情况 ===")
+detect_data_drift(ref_data, cur_data_drifted)
+```
+
+## 7.2 模型漂移与监控
+
+```python
+class ProductionMonitor:
+    """生产环境监控的简化概念模型"""
+
+    def __init__(self):
+        self.prediction_distribution_ref = None
+        self.daily_accuracy = []
+        self.daily_latency = []
+        self.alerts = []
+
+    def update_reference(self, predictions, ground_truth):
+        """用初始数据建立基线"""
+        self.prediction_distribution_ref = np.bincount(predictions)
+        baseline_acc = (predictions == ground_truth).mean()
+        print(f"基线已建立: 准确率 = {baseline_acc:.4f}")
+
+    def check_daily(self, predictions, ground_truth, latency_ms):
+        """每日检查"""
+        day_accuracy = (predictions == ground_truth).mean()
+        self.daily_accuracy.append(day_accuracy)
+        self.daily_latency.append(latency_ms)
+
+        # 检查准确率下降
+        if len(self.daily_accuracy) >= 7:
+            recent_avg = np.mean(self.daily_accuracy[-7:])
+            if self.daily_accuracy[0] - recent_avg > 0.05:
+                self.alerts.append(
+                    f"警告: 近7天准确率下降超过 5% ({recent_avg:.4f})"
+                )
+
+        # 检查延迟异常
+        if latency_ms > 100:
+            self.alerts.append(f"警告: 推理延迟 {latency_ms}ms 超过阈值")
+
+        # 检查预测分布偏移
+        if self.prediction_distribution_ref is not None:
+            new_dist = np.bincount(predictions,
+                                   minlength=len(self.prediction_distribution_ref))
+            js_div = self._jensen_shannon_divergence(
+                self.prediction_distribution_ref / self.prediction_distribution_ref.sum(),
+                new_dist / new_dist.sum()
+            )
+            if js_div > 0.1:
+                self.alerts.append(f"警告: 预测分布 JS 散度 = {js_div:.4f}")
+
+        return len(self.alerts) == 0  # True 表示一切正常
+
+    @staticmethod
+    def _jensen_shannon_divergence(p, q):
+        """Jensen-Shannon 散度"""
+        m = (p + q) / 2
+        kl_pm = np.sum(p * np.log(p / m + 1e-10))
+        kl_qm = np.sum(q * np.log(q / m + 1e-10))
+        return (kl_pm + kl_qm) / 2
+
+
+# 演示
+monitor = ProductionMonitor()
+monitor.update_reference(
+    np.random.randint(0, 3, 1000),
+    np.random.randint(0, 3, 1000)
+)
+```
+
+# 八、ML 平台全景图
+
+| 领域 | 工具选择 |
+|------|----------|
+| 实验跟踪 | wandb, MLflow, Neptune, ClearML |
+| 模型注册 | MLflow Model Registry, Seldon, BentoML |
+| 数据版本 | DVC, Pachyderm, lakeFS |
+| CI/CD 编排 | GitHub Actions, GitLab CI, Kubeflow Pipelines, Airflow |
+| 模型服务 | FastAPI + Docker, TorchServe, Triton Inference Server, BentoML |
+| 特征存储 | Feast, Tecton |
+| 监控 | Evidently AI, WhyLabs, Arize, NannyML |
+| 全栈平台 | Kubeflow, MLflow, SageMaker, Vertex AI |
+
+# 九、关键要点
+
+1. MLOps 管理的是**代码 + 数据 + 模型**三个维度的变化。
+2. **实验跟踪**不是可有可无——它是可复现性和团队协作的基础。
+3. 在生产环境中务必**固定随机种子**，但也要理解这不能保证 100% 可复现（GPU 浮点运算的非确定性）。
+4. **模型注册中心**提供了从"实验"到"生产"的正式通道。
+5. DVC 解决了"代码版本和数据版本脱节"的问题。
+6. ML CI/CD 需要**模型验证门**——新模型必须通过自动检查才能部署。
+7. **数据漂移**和**模型漂移**是 ML 系统独有的运维挑战，必须监控。
+8. 不要一开始就追求大而全的 MLOps 平台——从实验跟踪和基本监控开始，逐步演进。

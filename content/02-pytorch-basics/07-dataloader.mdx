@@ -1,0 +1,862 @@
+---
+title: "数据加载（Dataset & DataLoader）"
+description: "掌握 PyTorch 的数据加载体系，学会创建自定义 Dataset、使用 DataLoader 高效加载数据，以及应用 torchvision 的常用变换"
+part: "02-pytorch-basics"
+order: 7
+difficulty: "beginner"
+estimatedMinutes: 35
+objectives:
+  - "理解 Dataset 和 DataLoader 的设计模式"
+  - "掌握创建自定义 Dataset 的方法（CSV、图像、文本数据）"
+  - "熟练使用 DataLoader 的批处理、打乱、多进程加载功能"
+  - "掌握 torchvision.transforms 的常用数据增强方法"
+  - "学会使用 torchvision 内置的数据集"
+  - "了解数据加载的性能优化技巧"
+prerequisites: ["python-basics", "numpy-fundamentals", "pytorch-tensors"]
+keywords: ["Dataset", "DataLoader", "批处理", "数据增强", "torchvision", "MNIST", "transforms"]
+---
+
+## 数据加载体系概述
+
+PyTorch 的数据加载系统采用两层抽象设计：
+
+```
+原始数据 --> Dataset（加载+预处理单个样本） --> DataLoader（批处理+打乱+多进程） --> 模型训练
+```
+
+- **Dataset**：负责单个样本的加载和预处理
+- **DataLoader**：负责将多个样本组装成批次，管理打乱和多进程加载
+
+这种设计使得数据加载逻辑与训练逻辑完全解耦，代码清晰且易于复用。
+
+```python
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+# 概念演示：PyTorch 数据加载的完整流程
+print("=== PyTorch 数据加载流程 ===\n")
+print("1. 定义 Dataset：定义如何读取单个样本")
+print("2. 创建 DataLoader：指定 batch_size, shuffle, num_workers")
+print("3. 迭代 DataLoader：逐批获取数据用于训练\n")
+```
+
+## Dataset 类
+
+PyTorch 支持两种 Dataset 风格：
+
+### Map-style Dataset（最常用）
+
+需要实现 `__getitem__` 和 `__len__` 两个方法。
+
+```python
+import torch
+from torch.utils.data import Dataset
+
+class MyFirstDataset(Dataset):
+    """
+    最简单的自定义 Dataset 模板
+    """
+
+    def __init__(self, data, labels, transform=None):
+        """
+        Args:
+            data: 特征数据（列表、NumPy 数组或张量）
+            labels: 标签数据
+            transform: 可选的变换函数
+        """
+        self.data = data
+        self.labels = labels
+        self.transform = transform
+
+    def __len__(self):
+        """返回数据集的总样本数"""
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        """
+        返回第 idx 个样本
+
+        Args:
+            idx: 样本索引
+
+        Returns:
+            (sample, label) 元组
+        """
+        sample = self.data[idx]
+        label = self.labels[idx]
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample, label
+
+# 使用示例
+X = torch.randn(100, 10)  # 100 个样本，每个 10 维
+y = torch.randint(0, 3, (100,))  # 3 分类标签
+
+dataset = MyFirstDataset(X, y)
+print(f"数据集大小: {len(dataset)}")
+print(f"第 0 个样本: {dataset[0]}")
+print(f"第 5 个样本: 特征形状={dataset[5][0].shape}, 标签={dataset[5][1]}")
+```
+
+### 从 CSV 文件创建 Dataset
+
+```python
+import torch
+from torch.utils.data import Dataset
+import pandas as pd
+import numpy as np
+
+class CSVDataset(Dataset):
+    """
+    从 CSV 文件加载表格数据的 Dataset
+    """
+
+    def __init__(self, csv_path, label_column, transform=None):
+        """
+        Args:
+            csv_path: CSV 文件路径
+            label_column: 标签列的名称
+            transform: 可选的数据变换
+        """
+        df = pd.read_csv(csv_path)
+
+        # 分离特征和标签
+        self.labels = df[label_column].values.astype(np.int64)
+        self.features = df.drop(columns=[label_column]).values.astype(np.float32)
+        self.transform = transform
+
+        # 简单的标准化（可选）
+        self.features = (self.features - self.features.mean(axis=0)) / \
+                        (self.features.std(axis=0) + 1e-8)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        x = torch.from_numpy(self.features[idx])
+        y = torch.tensor(self.labels[idx], dtype=torch.long)
+
+        if self.transform:
+            x = self.transform(x)
+
+        return x, y
+
+# 使用 pandas 创建一个示例 CSV 进行演示
+import tempfile
+import os
+
+# 创建模拟数据
+demo_df = pd.DataFrame({
+    "feature_1": np.random.randn(200),
+    "feature_2": np.random.randn(200),
+    "feature_3": np.random.randn(200),
+    "label": np.random.randint(0, 3, 200),
+})
+
+with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
+    demo_df.to_csv(f, index=False)
+    tmp_csv_path = f.name
+
+# 加载数据集
+csv_dataset = CSVDataset(tmp_csv_path, label_column="label")
+print(f"CSV 数据集大小: {len(csv_dataset)}")
+print(f"第 0 个样本: 特征形状={csv_dataset[0][0].shape}, 标签={csv_dataset[0][1]}")
+print(f"特征均值: {csv_dataset.features.mean():.6f}")  # 接近 0（标准化后）
+print(f"特征标准差: {csv_dataset.features.std():.6f}")  # 接近 1
+
+os.unlink(tmp_csv_path)  # 清理临时文件
+```
+
+### 从图像文件创建 Dataset
+
+```python
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+import os
+import glob
+
+class ImageFolderDataset(Dataset):
+    """
+    从文件夹加载图像的 Dataset
+    期望目录结构：
+        root/
+            class_0/
+                img001.jpg
+                img002.jpg
+                ...
+            class_1/
+                img001.jpg
+                ...
+    """
+
+    def __init__(self, root_dir, transform=None):
+        """
+        Args:
+            root_dir: 数据集根目录
+            transform: torchvision.transforms 变换
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        self.samples = []
+        self.class_to_idx = {}
+
+        # 扫描目录
+        classes = sorted(os.listdir(root_dir))
+        for class_name in classes:
+            class_dir = os.path.join(root_dir, class_name)
+            if not os.path.isdir(class_dir):
+                continue
+
+            class_idx = len(self.class_to_idx)
+            self.class_to_idx[class_name] = class_idx
+
+            for img_path in glob.glob(os.path.join(class_dir, "*")):
+                if img_path.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    self.samples.append((img_path, class_idx))
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        img_path, label = self.samples[idx]
+
+        # 用 PIL 加载图像
+        image = Image.open(img_path).convert("RGB")
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image, label
+
+# 说明：这个类与 torchvision.datasets.ImageFolder 功能类似
+# 在真实项目中，直接使用 torchvision 内置的 ImageFolder 即可
+```
+
+### Iterable-style Dataset
+
+适用于数据无法全部加载到内存的情况（流式数据、大文件）。
+
+```python
+import torch
+from torch.utils.data import IterableDataset
+
+class RandomNumberDataset(IterableDataset):
+    """
+    生成随机数的流式 Dataset
+    适用于数据量大到无法一次性加载的场景
+    """
+
+    def __init__(self, max_samples, feature_dim=10):
+        self.max_samples = max_samples
+        self.feature_dim = feature_dim
+
+    def __iter__(self):
+        """
+        Iterable-style Dataset 需要实现 __iter__ 方法
+
+        注意：在多 worker 模式下，每个 worker 都会调用 __iter__
+        因此每次迭代都是独立的随机序列
+        """
+        worker_info = torch.utils.data.get_worker_info()
+        if worker_info is not None:
+            # 多 worker 模式：每个 worker 只生成一部分数据
+            per_worker = self.max_samples // worker_info.num_workers
+            start = worker_info.id * per_worker
+            end = start + per_worker if worker_info.id < worker_info.num_workers - 1 \
+                  else self.max_samples
+        else:
+            start, end = 0, self.max_samples
+
+        for _ in range(start, end):
+            x = torch.randn(self.feature_dim)
+            y = torch.randint(0, 2, (1,)).item()  # 二分类
+            yield x, y
+
+# 使用示例
+iter_dataset = RandomNumberDataset(max_samples=1000)
+print(f"Iterable-style Dataset")
+
+# 直接用 iter 测试
+it = iter(iter_dataset)
+sample = next(it)
+print(f"第 1 个样本: 特征形状={sample[0].shape}, 标签={sample[1]}")
+```
+
+## DataLoader：高效批处理
+
+DataLoader 是 PyTorch 数据加载的核心，负责将 Dataset 包装成可迭代的批次。
+
+```python
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+# 创建一个简单的 Dataset
+class SimpleDataset(Dataset):
+    def __init__(self, n_samples=1000, n_features=20):
+        self.data = torch.randn(n_samples, n_features)
+        self.labels = torch.randint(0, 5, (n_samples,))
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]
+
+dataset = SimpleDataset(n_samples=1000, n_features=20)
+
+# === DataLoader 基本用法 ===
+dataloader = DataLoader(
+    dataset,
+    batch_size=32,        # 每批 32 个样本
+    shuffle=True,         # 每个 epoch 打乱数据
+    num_workers=0,        # 数据加载子进程数（0 表示主进程加载）
+    drop_last=False,      # 是否丢弃最后不完整的批次
+    pin_memory=False,     # 是否将数据复制到 CUDA 固定内存
+)
+
+print("=== DataLoader 基本用法 ===\n")
+
+# 迭代 DataLoader
+for batch_idx, (data, labels) in enumerate(dataloader):
+    print(f"Batch {batch_idx}: data shape={data.shape}, labels shape={labels.shape}")
+
+    if batch_idx >= 2:  # 只展示前 3 个批次
+        break
+
+# === 关键参数详解 ===
+
+# shuffle=True: 每个 epoch 开始时重新打乱数据
+# 这对训练至关重要 -- 避免模型记住样本顺序
+dataloader_shuffled = DataLoader(dataset, batch_size=32, shuffle=True)
+first_batch_epoch1 = next(iter(dataloader_shuffled))[1][:5]
+first_batch_epoch2 = next(iter(dataloader_shuffled))[1][:5]
+print(f"\nshuffle=True 验证:")
+print(f"  Epoch 1 前5个标签: {first_batch_epoch1.tolist()}")
+print(f"  Epoch 2 前5个标签: {first_batch_epoch2.tolist()}")
+print(f"  顺序不同: {not torch.equal(first_batch_epoch1, first_batch_epoch2)}")
+
+# drop_last=True: 丢弃最后不足 batch_size 的批次
+# 避免 BatchNorm 在样本过少时的不稳定行为
+total_samples = 1000
+batch_size = 32
+
+dl_drop = DataLoader(dataset, batch_size=batch_size, drop_last=True)
+dl_keep = DataLoader(dataset, batch_size=batch_size, drop_last=False)
+
+print(f"\n总样本数: {total_samples}, batch_size: {batch_size}")
+print(f"drop_last=True:  {len(dl_drop)} 个批次 (丢弃 {total_samples - 32*len(dl_drop)} 个样本)")
+print(f"drop_last=False: {len(dl_keep)} 个批次 (最后一批 {total_samples % batch_size} 个样本)")
+```
+
+### DataLoader 高级参数
+
+```python
+import torch
+from torch.utils.data import Dataset, DataLoader
+import time
+
+class SlowDataset(Dataset):
+    """模拟数据加载耗时的 Dataset"""
+    def __init__(self, n=500):
+        self.data = torch.randn(n, 100)
+        self.labels = torch.randint(0, 10, (n,))
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        # 模拟数据加载/预处理的耗时操作
+        time.sleep(0.001)  # 1ms 延迟
+        return self.data[idx], self.labels[idx]
+
+dataset = SlowDataset(n=500)
+
+# === num_workers：多进程数据加载 ===
+# num_workers=0: 主进程加载数据（简单调试时使用）
+# num_workers>0: 子进程并行加载数据（训练时必须使用）
+
+print("=== 不同 num_workers 的加载性能 ===\n")
+
+for n_workers in [0, 2, 4]:
+    dataloader = DataLoader(
+        dataset,
+        batch_size=64,
+        shuffle=True,
+        num_workers=n_workers,
+    )
+
+    start = time.perf_counter()
+    for batch_data, batch_labels in dataloader:
+        pass  # 模拟一次 epoch 的数据加载
+    elapsed = time.perf_counter() - start
+
+    print(f"num_workers={n_workers}: {elapsed:.2f}s")
+
+# === pin_memory：加速 CPU->GPU 传输 ===
+# 将数据锁页在 CPU 内存中，加速向 GPU 的传输
+# 只对 CUDA 训练有意义
+
+if torch.cuda.is_available():
+    # 创建 pin_memory 的 DataLoader
+    dl_pinned = DataLoader(
+        dataset,
+        batch_size=64,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=2,
+    )
+
+    for data, labels in dl_pinned:
+        # pin_memory 的数据可以直接 .to('cuda', non_blocking=True)
+        data_gpu = data.to('cuda', non_blocking=True)
+        labels_gpu = labels.to('cuda', non_blocking=True)
+        print(f"pin_memory 数据在 GPU 上: {data_gpu.device}")
+        break
+
+# === prefetch_factor：预取因子 ===
+# 每个 worker 预先加载多少批次（仅 num_workers > 0 时有效）
+dl_prefetch = DataLoader(
+    dataset,
+    batch_size=64,
+    num_workers=4,
+    prefetch_factor=4,  # 每个 worker 预取 4 个批次
+)
+print(f"\nprefetch_factor=4: 每个 worker 会预先准备 4 个批次的数据")
+
+# === persistent_workers：保持 worker 进程 ===
+# 避免每个 epoch 重复创建/销毁 worker 进程
+dl_persistent = DataLoader(
+    dataset,
+    batch_size=64,
+    num_workers=4,
+    persistent_workers=True,  # worker 进程在 epoch 之间保持存活
+)
+print("persistent_workers=True: worker 进程不会在每个 epoch 后被销毁")
+```
+
+## torchvision.transforms：数据变换与增强
+
+torchvision.transforms 是计算机视觉任务中数据预处理和增强的核心工具。
+
+```python
+import torch
+from torchvision import transforms
+from PIL import Image
+import numpy as np
+
+# === 创建一个综合的变换管道 ===
+
+# 训练时的变换（包含数据增强）
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),          # 调整大小
+    transforms.RandomHorizontalFlip(p=0.5),  # 随机水平翻转（50% 概率）
+    transforms.RandomRotation(degrees=15),   # 随机旋转 ±15 度
+    transforms.ColorJitter(
+        brightness=0.2,                      # 亮度调整
+        contrast=0.2,                        # 对比度调整
+        saturation=0.2,                      # 饱和度调整
+        hue=0.1,                             # 色调调整
+    ),
+    transforms.ToTensor(),                   # PIL Image / numpy -> Tensor [0, 1]
+    transforms.Normalize(                    # 标准化
+        mean=[0.485, 0.456, 0.406],         # ImageNet 均值
+        std=[0.229, 0.224, 0.225]           # ImageNet 标准差
+    ),
+    # transforms.RandomErasing(p=0.3),       # 随机擦除（可选）
+])
+
+# 验证/测试时的变换（不需要数据增强）
+eval_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    ),
+])
+
+print("训练变换管道:")
+print(train_transform)
+```
+
+### 常用变换详解
+
+```python
+import torch
+from torchvision import transforms
+from PIL import Image
+
+# 创建一个模拟的 PIL 图像用于演示
+demo_image = Image.fromarray(
+    np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+)
+
+print("=== 各变换效果演示 ===\n")
+
+# ToTensor: PIL Image (H,W,C) [0,255] -> Tensor (C,H,W) [0.0, 1.0]
+to_tensor = transforms.ToTensor()
+tensor_img = to_tensor(demo_image)
+print(f"ToTensor: {type(demo_image)} {demo_image.size} -> {type(tensor_img)} {tensor_img.shape}")
+print(f"  值域: [{tensor_img.min():.3f}, {tensor_img.max():.3f}]\n")
+
+# Normalize: (x - mean) / std
+normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+normalized = normalize(tensor_img)
+print(f"Normalize (mean=0.5, std=0.5):")
+print(f"  新均值≈0: {normalized.mean():.4f}")
+print(f"  新标准差≈1: {normalized.std():.4f}\n")
+
+# Resize: 调整图像大小
+resize = transforms.Resize((64, 64))
+resized = to_tensor(resize(demo_image))
+print(f"Resize (100,100) -> (64,64): {resized.shape}\n")
+
+# RandomHorizontalFlip: 随机水平翻转
+flip = transforms.RandomHorizontalFlip(p=1.0)  # 100% 概率保证翻转
+flipped = to_tensor(flip(demo_image))
+print(f"RandomHorizontalFlip (p=1.0): 图像已水平翻转\n")
+
+# CenterCrop: 中心裁剪
+center_crop = transforms.CenterCrop((50, 50))
+cropped = to_tensor(center_crop(demo_image))
+print(f"CenterCrop (50,50): {cropped.shape}\n")
+
+# RandomCrop: 随机位置裁剪
+random_crop = transforms.RandomCrop((50, 50))
+rc = to_tensor(random_crop(demo_image))
+print(f"RandomCrop (50,50): {rc.shape}\n")
+
+# Grayscale: 转灰度图
+gray = transforms.Grayscale(num_output_channels=1)
+gray_tensor = gray(tensor_img)
+print(f"Grayscale: {gray_tensor.shape} (单通道)\n")
+
+# Lambda: 自定义变换
+add_noise = transforms.Lambda(lambda x: x + 0.1 * torch.randn_like(x))
+noisy = add_noise(tensor_img)
+print(f"Lambda (添加噪声): 值域 [{noisy.min():.3f}, {noisy.max():.3f}]")
+```
+
+## 内置数据集：torchvision.datasets
+
+torchvision 提供了一系列常用数据集的便捷加载接口。
+
+```python
+import torch
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+# === MNIST 手写数字 ===
+print("=== MNIST 数据集 ===\n")
+
+mnist_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,))  # MNIST 的均值和标准差
+])
+
+# 训练集
+mnist_train = datasets.MNIST(
+    root="./data",           # 数据存储目录
+    train=True,              # 训练集
+    download=True,           # 如果不存在则下载
+    transform=mnist_transform,
+)
+
+# 测试集
+mnist_test = datasets.MNIST(
+    root="./data",
+    train=False,             # 测试集
+    download=True,
+    transform=mnist_transform,
+)
+
+print(f"MNIST 训练集: {len(mnist_train)} 张图片")
+print(f"MNIST 测试集: {len(mnist_test)} 张图片")
+
+# 查看一个样本
+img, label = mnist_train[0]
+print(f"图片形状: {img.shape}")  # (1, 28, 28)
+print(f"标签: {label}")
+print(f"类别名称: {mnist_train.classes[label]}")
+print(f"类别总数: {len(mnist_train.classes)}")
+
+# === CIFAR10 ===
+print(f"\n=== CIFAR-10 数据集 ===\n")
+
+cifar_transform = transforms.Compose([
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomCrop(32, padding=4),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.4914, 0.4822, 0.4465],
+        std=[0.2470, 0.2435, 0.2616]
+    ),
+])
+
+cifar_train = datasets.CIFAR10(
+    root="./data",
+    train=True,
+    download=True,
+    transform=cifar_transform,
+)
+
+cifar_test = datasets.CIFAR10(
+    root="./data",
+    train=False,
+    download=True,
+    transform=transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=[0.4914, 0.4822, 0.4465],
+            std=[0.2470, 0.2435, 0.2616]
+        ),
+    ]),
+)
+
+print(f"CIFAR-10 训练集: {len(cifar_train)} 张图片")
+print(f"CIFAR-10 测试集: {len(cifar_test)} 张图片")
+print(f"类别: {cifar_train.classes}")
+```
+
+## 完整示例：加载 MNIST 并遍历批次
+
+```python
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+# === 1. 定义数据变换 ===
+train_transform = transforms.Compose([
+    transforms.RandomRotation(degrees=10),
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,)),
+])
+
+test_transform = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.1307,), (0.3081,)),
+])
+
+# === 2. 加载数据集 ===
+train_dataset = datasets.MNIST(
+    root="./data",
+    train=True,
+    download=True,
+    transform=train_transform,
+)
+
+test_dataset = datasets.MNIST(
+    root="./data",
+    train=False,
+    download=True,
+    transform=test_transform,
+)
+
+# === 3. 创建 DataLoader ===
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=64,
+    shuffle=True,
+    num_workers=0,       # 小数据集用 0 即可
+    drop_last=True,       # 丢弃最后不完整的批次
+    pin_memory=True if torch.cuda.is_available() else False,
+)
+
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=128,
+    shuffle=False,        # 测试集不需要打乱
+    num_workers=0,
+    pin_memory=True if torch.cuda.is_available() else False,
+)
+
+# === 4. 数据概览 ===
+print("=== MNIST 数据加载完成 ===\n")
+print(f"训练集样本数: {len(train_dataset)}")
+print(f"测试集样本数: {len(test_dataset)}")
+print(f"训练批次数:   {len(train_loader)} (batch_size=64)")
+print(f"测试批次数:   {len(test_loader)} (batch_size=128)")
+
+# === 5. 遍历数据 ===
+print(f"\n=== 遍历训练数据 ===\n")
+
+# 获取第一个批次
+data_iter = iter(train_loader)
+images, labels = next(data_iter)
+
+print(f"单批数据:")
+print(f"  图像形状: {images.shape}")        # (64, 1, 28, 28)
+print(f"  标签形状: {labels.shape}")        # (64,)
+print(f"  标签范围: [{labels.min()}, {labels.max()}]")
+print(f"  数据范围: [{images.min():.3f}, {images.max():.3f}] (标准化后)")
+print(f"  数据类型: {images.dtype}")
+
+# === 6. 完整训练循环模板 ===
+print(f"\n=== 训练循环模板 ===\n")
+
+# 定义一个简单的模型用于演示
+class SimpleCNN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 32, 3, 1)
+        self.conv2 = nn.Conv2d(32, 64, 3, 1)
+        self.dropout1 = nn.Dropout2d(0.25)
+        self.dropout2 = nn.Dropout2d(0.5)
+        self.fc1 = nn.Linear(9216, 128)
+        self.fc2 = nn.Linear(128, 10)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = torch.relu(x)
+        x = self.conv2(x)
+        x = torch.relu(x)
+        x = torch.max_pool2d(x, 2)
+        x = self.dropout1(x)
+        x = torch.flatten(x, 1)
+        x = self.fc1(x)
+        x = torch.relu(x)
+        x = self.dropout2(x)
+        x = self.fc2(x)
+        return x
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = SimpleCNN().to(device)
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+print(f"训练设备: {device}")
+print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}\n")
+
+# 模拟几个训练步骤
+model.train()
+for epoch in range(1):  # 只演示 1 个 epoch
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for batch_idx, (data, target) in enumerate(train_loader):
+        # 1. 将数据移到设备
+        data, target = data.to(device), target.to(device)
+
+        # 2. 归零梯度
+        optimizer.zero_grad()
+
+        # 3. 前向传播
+        output = model(data)
+        loss = criterion(output, target)
+
+        # 4. 反向传播
+        loss.backward()
+
+        # 5. 更新参数
+        optimizer.step()
+
+        # 6. 统计
+        running_loss += loss.item()
+        _, predicted = output.max(1)
+        total += target.size(0)
+        correct += predicted.eq(target).sum().item()
+
+        if batch_idx >= 5:  # 只跑 6 个批次演示
+            break
+
+    avg_loss = running_loss / min(6, len(train_loader))
+    accuracy = 100. * correct / total
+    print(f"Epoch {epoch+1}: Avg Loss={avg_loss:.4f}, Accuracy={accuracy:.2f}%")
+```
+
+## 性能优化技巧
+
+```python
+# === DataLoader 性能优化的最佳实践 ===
+
+def create_optimized_dataloader(dataset, training=True):
+    """
+    创建一个性能优化过的 DataLoader
+
+    各部分的意义：
+    - num_workers > 0: 多进程并行加载数据
+    - pin_memory=True: 加速 CPU->GPU 传输
+    - persistent_workers=True: 避免重复创建进程
+    - prefetch_factor: 每个 worker 预加载的数据量
+    - non_blocking transfer: GPU 传输时 GPU 可同时计算
+    """
+
+    batch_size = 64 if training else 128
+    num_workers = 4  # 一般设为 CPU 核心数，但不超过 8
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=training,
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=2,
+        drop_last=training,  # 训练时丢弃不完整批次
+    )
+    return loader
+```
+
+### 性能建议总结
+
+| 参数 | 建议值 | 说明 |
+|------|--------|------|
+| `batch_size` | 32-256 | 太小浪费 GPU，太大 OOM。取 2 的幂 |
+| `num_workers` | 4-8 | 一般为 CPU 核心数，不超过 8 避免瓶颈 |
+| `pin_memory` | True | 对 CUDA 训练几乎总是有益的 |
+| `persistent_workers` | True | 避免每个 epoch 创建/销毁 worker |
+| `prefetch_factor` | 2-4 | 保持 GPU 始终有数据可算 |
+| `drop_last` | True (训练) | 避免 BatchNorm 在极小批次上不稳定 |
+
+### 数据加载的内存考虑
+
+```python
+# 避免这些常见的内存陷阱：
+
+# ❌ 不好：在 Dataset 中保存大量 PIL Image 对象
+class BadImageDataset(Dataset):
+    def __init__(self, image_paths):
+        # 这会在内存中保存所有解码后的图像
+        self.images = [Image.open(p) for p in image_paths]
+
+# ✅ 好：按需加载（在 __getitem__ 中打开）
+class GoodImageDataset(Dataset):
+    def __init__(self, image_paths):
+        self.image_paths = image_paths  # 只保存路径
+
+    def __getitem__(self, idx):
+        # 每次请求时再打开图像
+        image = Image.open(self.image_paths[idx])
+        return self.transform(image)
+
+# ✅ 好：对于小数据集，可以预先加载到内存中
+class PreloadedDataset(Dataset):
+    def __init__(self, image_paths, transform=None):
+        self.transform = transform
+        # 预先加载并转换为张量（节省后续 I/O 时间）
+        self.data = []
+        self.labels = []
+        for path, label in image_paths:
+            img = Image.open(path)
+            if transform:
+                img = transform(img)
+            self.data.append(img)
+            self.labels.append(label)
+```
+
+## 本节小结
+
+- **Dataset** 定义如何加载单个样本，只需实现 `__len__` 和 `__getitem__`
+- **DataLoader** 负责批处理、打乱和多进程加载
+- Map-style Dataset 适用于已知长度的数据集，Iterable-style 适用于流式数据
+- 训练时 `shuffle=True` 至关重要，避免模型记忆样本顺序
+- `num_workers` 多进程加载是训练大模型的必备优化
+- `torchvision.transforms.Compose` 构建变换管道，训练时加入数据增强
+- `torchvision.datasets` 提供 MNIST、CIFAR10、ImageNet 等常用数据集
+- `pin_memory=True` + `non_blocking=True` 数据传输可加速 GPU 训练
+- 完整训练循环模式：数据加载 -> 设备转移 -> 梯度归零 -> 前向 -> 反向 -> 更新

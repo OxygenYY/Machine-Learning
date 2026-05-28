@@ -1,0 +1,574 @@
+---
+title: "概率与统计"
+description: "掌握概率分布、贝叶斯定理、MLE 和统计量——理解模型输出、损失函数和不确定性量化的数学语言"
+part: "00-prerequisites"
+order: 5
+difficulty: "beginner"
+estimatedMinutes: 40
+objectives:
+  - "理解随机变量的概念和类型"
+  - "掌握 Bernoulli、Binomial 和正态分布"
+  - "理解期望、方差和协方差"
+  - "掌握条件概率和贝叶斯定理"
+  - "理解最大似然估计 (MLE) 的直觉"
+  - "认识概率统计在 ML 中的核心角色"
+prerequisites:
+  - "calculus-optimization"
+keywords:
+  - "probability"
+  - "bayes theorem"
+  - "MLE"
+  - "normal distribution"
+  - "statistics"
+---
+
+## 为什么机器学习离不开概率统计？
+
+机器学习在本质上是关于**不确定性**的科学。我们的数据有噪声，模型的预测不是绝对确定的，决策需要量化置信度。概率论为所有这些不确定性提供了数学语言：
+
+- **模型输出**：Softmax 输出的就是概率分布 $P(y|x, \theta)$
+- **损失函数**：交叉熵损失 = 负对数似然 (Negative Log-Likelihood)
+- **生成模型**：VAE、GAN、扩散模型都在学习 $P(x)$ 或 $P(x|z)$
+- **评估指标**：AUC-ROC、校准曲线等都基于概率解释
+- **贝叶斯方法**：贝叶斯网络、概率图模型、贝叶斯深度学习
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+```
+
+## 1. 随机变量
+
+### 定义
+
+**随机变量**是一个取值不确定的变量：它的可能值来自一个样本空间 $\Omega$，每个值有不同的概率。
+
+**ML 意义**：
+- 真实标签 $Y$ 是一个随机变量（数据生成过程中的不确定性）
+- 模型预测 $\hat{Y}$ 产生一个概率分布
+- 噪声 $\epsilon$ 通常被建模为随机变量
+
+### 离散随机变量
+
+离散随机变量取**有限**或**可数无限**个值。
+
+**概率质量函数 (PMF)**：$P(X = x_k)$ 给出 $X$ 恰好等于 $x_k$ 的概率。
+
+```python
+# 模拟掷骰子 — 离散随机变量
+# PMF: P(X=k) = 1/6  for k in {1,2,3,4,5,6}
+
+# 模拟 10000 次掷骰
+np.random.seed(42)
+rolls = np.random.randint(1, 7, size=10000)
+
+# 经验 PMF
+unique, counts = np.unique(rolls, return_counts=True)
+pmf = counts / len(rolls)
+
+print("掷骰子的经验 PMF:")
+for k, p in zip(unique, pmf):
+    bar = "█" * int(p * 100)
+    print(f"  P(X={k}) = {p:.3f} {bar}")
+print(f"  概率和 = {pmf.sum():.3f} (应该为 1)")
+
+# ML 中的离散随机变量：多分类标签
+# 图像分类：P(class="猫") = 0.7, P(class="狗") = 0.2, P(class="鸟") = 0.1
+```
+
+### 连续随机变量
+
+连续随机变量取**区间内的任意实数值**。
+
+**概率密度函数 (PDF)**：$f(x)$，满足 $P(a \leq X \leq b) = \int_a^b f(x) dx$。
+
+关键是：**连续随机变量取任意单个值的概率为 0**——只有区间才有非零概率。
+
+```python
+# 模拟身高数据 — 连续随机变量
+heights = np.random.normal(loc=170, scale=7, size=10000)
+
+# 估计 PDF（使用直方图）
+counts, bin_edges = np.histogram(heights, bins=50, density=True)
+bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+print(f"身高统计 (生成 10000 人):")
+print(f"  均值: {heights.mean():.1f} cm")
+print(f"  标准差: {heights.std():.1f} cm")
+print(f"  范围: [{heights.min():.1f}, {heights.max():.1f}] cm")
+
+# 概率估算
+prob_160_180 = ((heights >= 160) & (heights <= 180)).mean()
+print(f"  P(160 ≤ 身高 ≤ 180) ≈ {prob_160_180:.1%}")
+print(f"  P(身高 = 170 精确) = 0 (连续变量的特性)")
+```
+
+## 2. 重要概率分布
+
+### Bernoulli 分布（伯努利分布）
+
+最简单的离散分布：一次试验，成功概率为 $p$。
+
+$$P(X = 1) = p, \quad P(X = 0) = 1 - p$$
+
+**ML 意义**：二分类问题的输出层（Sigmoid）就是在建模 Bernoulli 分布的参数 $p$。
+
+```python
+# Bernoulli 分布
+p = 0.7  # 成功概率
+n_samples = 1000
+
+# 模拟 Bernoulli 试验
+bernoulli_samples = np.random.binomial(n=1, p=p, size=n_samples)
+
+# 统计
+prob_one = bernoulli_samples.mean()
+print(f"Bernoulli(p={p}):")
+print(f"  P(X=1) 估计: {prob_one:.3f} (理论值: {p})")
+print(f"  P(X=0) 估计: {1 - prob_one:.3f} (理论值: {1-p})")
+
+# ML 场景：100 个模型的二分类预测
+model_predictions = np.random.binomial(n=1, p=0.85, size=100)
+accuracy = model_predictions.mean()
+print(f"\n模拟 100 次二分类预测 (准确率 85%):")
+print(f"  正确次数: {model_predictions.sum():.0f}")
+print(f"  准确率: {accuracy:.1%}")
+```
+
+### Binomial 分布（二项分布）
+
+$n$ 次独立 Bernoulli 试验中成功的次数：
+
+$$P(X = k) = \binom{n}{k} p^k (1-p)^{n-k}$$
+
+**ML 意义**：集成模型投票（Ensemble）、batch 中正确分类样本数的分布。
+
+```python
+# Binomial 分布: 10 次抛硬币，每次正面概率 0.5
+n, p = 10, 0.5
+binomial_samples = np.random.binomial(n=n, p=p, size=10000)
+
+# PMF
+values, counts = np.unique(binomial_samples, return_counts=True)
+pmf = counts / len(binomial_samples)
+
+print(f"Binomial(n={n}, p={p}) — 10 次抛硬币的正面次数:")
+for k, prob in zip(values, pmf):
+    bar = "█" * int(prob * 200)
+    # 理论值比较
+    from math import comb
+    theoretical = comb(n, k) * (p**k) * ((1-p)**(n-k))
+    print(f"  P(X={k:2d}) = {prob:.3f} {bar} (理论: {theoretical:.3f})")
+```
+
+### 正态分布 (Gaussian / Normal Distribution)
+
+ML 中最重要的连续分布：
+
+$$f(x) = \frac{1}{\sigma\sqrt{2\pi}} \exp\left(-\frac{(x - \mu)^2}{2\sigma^2}\right)$$
+
+**ML 意义**：
+- **权重初始化**：He/Xavier 都是正态分布
+- **噪声建模**：线性回归假设误差 $\epsilon \sim \mathcal{N}(0, \sigma^2)$
+- **VAE 的隐变量**：编码器输出 $\mu$ 和 $\sigma$，假设 $z \sim \mathcal{N}(\mu, \sigma^2)$
+- **扩散模型**：逐步加高斯噪声
+- **Batch Normalization**：强制激活值呈正态分布
+- **中心极限定理**：大量独立随机变量之和趋近正态分布
+
+```python
+# 正态分布
+mu, sigma = 0, 1
+samples = np.random.normal(loc=mu, scale=sigma, size=10000)
+
+print("标准正态分布 N(0, 1):")
+print(f"  均值: {samples.mean():.4f} (理论: 0)")
+print(f"  标准差: {samples.std():.4f} (理论: 1)")
+print(f"  偏度: {np.mean(((samples - samples.mean()) / samples.std())**3):.4f} (理论: 0)")
+
+# 68-95-99.7 规则 (经验法则)
+for k, name in [(1, "68"), (2, "95"), (3, "99.7")]:
+    within = (np.abs(samples) < k).mean()
+    print(f"  在 ±{k}σ 内: {within:.2%} ({name}% 规则)")
+
+# ML 应用：模拟 Xavier 初始化
+n_in = 100
+std_xavier = np.sqrt(2.0 / n_in)
+weights = np.random.normal(0, std_xavier, size=n_in)
+print(f"\nXavier 初始化: W ~ N(0, {std_xavier:.4f})")
+print(f"  经验均值: {weights.mean():.6f}")
+print(f"  经验标准差: {weights.std():.6f}")
+```
+
+## 3. 期望、方差与标准差
+
+### 期望 (Expectation / Mean)
+
+期望是随机变量的"加权平均"——按概率加权：
+
+$$\mathbb{E}[X] = \begin{cases} \sum_k x_k P(X=x_k) & \text{离散} \\ \int x f(x) dx & \text{连续} \end{cases}$$
+
+```python
+data = np.random.randn(1000) * 5 + 100  # N(100, 25)
+
+# 样本均值 = 期望的无偏估计
+sample_mean = np.mean(data)
+print(f"期望 (样本均值): {sample_mean:.2f}")
+
+# 加权平均的例子 — 不均衡数据集
+# 3 个类别，样本数严重不均衡
+class_values = np.array([0.3, 0.5, 0.1])  # 各类别的某种指标
+class_weights = np.array([0.7, 0.2, 0.1])  # 类别分布
+weighted_mean = np.average(class_values, weights=class_weights)
+simple_mean = np.mean(class_values)
+print(f"\n类别值: {class_values}")
+print(f"类别权重: {class_weights}")
+print(f"简单平均: {simple_mean:.3f}")
+print(f"加权平均 (按类别分布): {weighted_mean:.3f}")
+print(f"在类别不均衡时，加权平均更合理!")
+```
+
+### 方差与标准差
+
+方差衡量随机变量偏离其期望的程度：
+
+$$\text{Var}(X) = \mathbb{E}[(X - \mathbb{E}[X])^2]$$
+
+标准差 $\sigma = \sqrt{\text{Var}(X)}$ 与原始数据同单位，更容易解释。
+
+```python
+data = np.random.randn(1000) * 5 + 100  # N(100, 25)
+
+var_population = np.var(data)     # 总体方差（除以 n）
+var_sample = np.var(data, ddof=1) # 样本方差（除以 n-1，无偏）
+
+print(f"总体方差 (除以 n):   {var_population:.2f}")
+print(f"样本方差 (除以 n-1): {var_sample:.2f}")
+print(f"标准差:               {np.std(data):.2f}")
+
+# 理解方差
+print(f"\n数据范围: [{data.min():.1f}, {data.max():.1f}]")
+print(f"均值: {data.mean():.1f}")
+print(f"均值 ± 1σ: [{data.mean() - data.std():.1f}, {data.mean() + data.std():.1f}]")
+print(f"均值 ± 2σ: [{data.mean() - 2*data.std():.1f}, {data.mean() + 2*data.std():.1f}]")
+
+# 在 ML 中：模型预测的方差衡量不确定性
+# 高方差 -> 模型对输入变化敏感 -> 可能过拟合
+```
+
+## 4. 协方差与相关性
+
+### 协方差
+
+协方差衡量两个随机变量的**线性相关关系**：
+
+$$\text{Cov}(X, Y) = \mathbb{E}[(X - \mathbb{E}[X])(Y - \mathbb{E}[Y])]$$
+
+- $\text{Cov}(X, Y) > 0$：$X$ 大时 $Y$ 也大（正相关）
+- $\text{Cov}(X, Y) < 0$：$X$ 大时 $Y$ 小（负相关）
+- $\text{Cov}(X, Y) \approx 0$：没有线性关系
+
+### 相关系数
+
+相关系数将协方差标准化到 $[-1, 1]$ 范围（Pearson 相关系数）：
+
+$$\rho_{XY} = \frac{\text{Cov}(X, Y)}{\sigma_X \sigma_Y}$$
+
+```python
+np.random.seed(42)
+n = 500
+
+# 正相关数据
+x_pos = np.random.randn(n)
+y_pos = 0.8 * x_pos + 0.2 * np.random.randn(n)
+
+# 负相关数据
+x_neg = np.random.randn(n)
+y_neg = -0.7 * x_neg + 0.3 * np.random.randn(n)
+
+# 无相关数据
+x_none = np.random.randn(n)
+y_none = np.random.randn(n)
+
+# 计算相关系数
+corr_pos = np.corrcoef(x_pos, y_pos)[0, 1]
+corr_neg = np.corrcoef(x_neg, y_neg)[0, 1]
+corr_none = np.corrcoef(x_none, y_none)[0, 1]
+
+print("Pearson 相关系数:")
+print(f"  正相关数据: ρ = {corr_pos:+.3f}")
+print(f"  负相关数据: ρ = {corr_neg:+.3f}")
+print(f"  无关数据:   ρ = {corr_none:+.3f}")
+
+# 协方差矩阵 — PCA 的基础
+# 将所有特征对的协方差组织成矩阵
+X_combined = np.column_stack([x_pos, y_pos, x_neg[:n]])
+cov_matrix = np.cov(X_combined, rowvar=False)
+print(f"\n协方差矩阵 (3 个特征):\n{np.round(cov_matrix, 3)}")
+
+# ML 中：特征选择时检查特征间的相关性
+# 高相关性 -> 信息冗余 -> 可以删除其中一个特征
+```
+
+### ML 中的协方差矩阵
+
+协方差矩阵是 PCA 的核心：**PCA 找到的特征向量就是协方差矩阵的特征向量**。
+
+```python
+# 演示：PCA 中用到的协方差矩阵
+# 生成有相关性的 2D 数据
+base = np.random.randn(200, 1)
+X_pca = np.hstack([base, 0.85 * base + 0.15 * np.random.randn(200, 1)])
+
+# 计算协方差矩阵
+cov_mat = np.cov(X_pca, rowvar=False)
+print(f"协方差矩阵:\n{np.round(cov_mat, 3)}")
+
+# 协方差矩阵的特征向量 = 主成分方向
+eigenvalues, eigenvectors = np.linalg.eigh(cov_mat)
+sorted_idx = np.argsort(eigenvalues)[::-1]
+pc1 = eigenvectors[:, sorted_idx[0]]
+pc2 = eigenvectors[:, sorted_idx[1]]
+
+print(f"\n主成分 1 方向: {np.round(pc1, 3)} (解释方差: {eigenvalues[sorted_idx[0]]:.3f})")
+print(f"主成分 2 方向: {np.round(pc2, 3)} (解释方差: {eigenvalues[sorted_idx[1]]:.3f})")
+print(f"解释方差比: {eigenvalues[sorted_idx[0]] / eigenvalues.sum():.1%}")
+```
+
+## 5. 条件概率与贝叶斯定理
+
+### 条件概率
+
+在事件 $B$ 已发生的条件下，事件 $A$ 发生的概率：
+
+$$P(A|B) = \frac{P(A \cap B)}{P(B)}$$
+
+**ML 意义**：我们几乎总是在计算 $P(y|x)$——给定输入特征后的标签概率。
+
+```python
+# 条件概率的实际例子：垃圾邮件分类
+# 假设数据
+n_total = 10000
+n_spam = 2000               # 20% 是垃圾邮件
+n_contains_viagra = 500     # 5% 包含 "viagra" 这个词
+
+# "viagra" 出现在垃圾邮件和非垃圾邮件中的比例
+n_viagra_in_spam = 400      # 包含 "viagra" 的邮件中 400 封是垃圾邮件
+n_viagra_in_ham = 100       # 100 封是正常邮件
+
+# 条件概率
+P_spam = n_spam / n_total
+P_viagra_given_spam = n_viagra_in_spam / n_spam
+P_viagra = n_contains_viagra / n_total
+
+print("垃圾邮件检测 — 条件概率示例:")
+print(f"  P(垃圾邮件) = {P_spam:.1%}")
+print(f"  P(包含 viagra | 垃圾邮件) = {P_viagra_given_spam:.1%}")
+print(f"  P(包含 viagra) = {P_viagra:.1%}")
+
+# 用条件概率公式计算 P(垃圾邮件 | 包含 viagra)
+P_spam_given_viagra = P_viagra_given_spam * P_spam / P_viagra
+print(f"\n  P(垃圾邮件 | 包含 viagra) = {P_spam_given_viagra:.1%}")
+print(f"  解读: 如果一封邮件包含 'viagra', 它是垃圾邮件的概率是 {P_spam_given_viagra:.0%}")
+```
+
+### 贝叶斯定理
+
+这是概率论中最著名的公式之一：
+
+$$P(A|B) = \frac{P(B|A) \cdot P(A)}{P(B)}$$
+
+其中：
+- $P(A)$ 是先验概率 (Prior)
+- $P(B|A)$ 是似然 (Likelihood)
+- $P(A|B)$ 是后验概率 (Posterior)
+
+**ML 意义**：
+- **朴素贝叶斯分类器**：直接应用贝叶斯定理的 ML 模型
+- **贝叶斯推断**：用数据更新对参数的信念
+- **贝叶斯优化**：超参数调优的强大工具
+
+```python
+# 医疗检测中的贝叶斯定理 — 经典案例
+# 某种疾病的患病率为 1%
+P_disease = 0.01
+P_no_disease = 1 - P_disease
+
+# 检测准确率
+P_positive_given_disease = 0.95   # 灵敏度 (真阳性率)
+P_negative_given_no_disease = 0.90  # 特异性 (真阴性率)
+P_positive_given_no_disease = 1 - P_negative_given_no_disease  # 假阳性率
+
+# 全概率公式: P(阳性) = P(阳性|有病)*P(有病) + P(阳性|没病)*P(没病)
+P_positive = (P_positive_given_disease * P_disease +
+              P_positive_given_no_disease * P_no_disease)
+
+# 贝叶斯定理: P(有病|阳性) 
+P_disease_given_positive = (P_positive_given_disease * P_disease) / P_positive
+
+print("=" * 50)
+print("医疗检测中的贝叶斯定理")
+print("=" * 50)
+print(f"患病率 (先验):            {P_disease:.1%}")
+print(f"检测灵敏度:               {P_positive_given_disease:.1%}")
+print(f"假阳性率:                 {P_positive_given_no_disease:.1%}")
+print(f"任意检测呈阳性的概率:     {P_positive:.2%}")
+print(f"\n>>> P(患病 | 检测呈阳性) = {P_disease_given_positive:.2%} <<<")
+print(f"\n关键洞察：尽管检测准确率高达 90-95%，")
+print(f"但检测呈阳性后实际患病的概率只有约 {P_disease_given_positive:.0%}！")
+print(f"这是因为患病率太低 (1%)，多数阳性结果实际是假阳性。")
+print(f"这就是先验概率的威力 — 也是为什么不能只看单次检测结果。")
+```
+
+## 6. 最大似然估计 (MLE)
+
+### 直觉
+
+**核心问题**：给定观察到的数据，什么样的参数最"可能"产生这些数据？
+
+假设我们观测到一组数据 $x_1, x_2, \ldots, x_n$，并且知道它们来自正态分布，但不知道 $\mu$ 和 $\sigma$。MLE 寻找使得观测数据出现概率最大的参数值。
+
+$$\hat{\theta}_{\text{MLE}} = \arg\max_{\theta} P(X|\theta)$$
+
+**ML 意义**：
+- **交叉熵损失 = 负对数似然**（最小化交叉熵 = 最大化似然）
+- **线性回归的 MSE 损失** = 假设高斯噪声后的 MLE
+- **分类问题的 Softmax + 交叉熵** = 多项式分布的 MLE
+
+### MLE 的手动演示
+
+```python
+# 演示：估计硬币正面概率的 MLE
+# 假设我们抛了 10 次硬币，观察到 7 次正面
+# 问题：硬币正面概率 p 是多少？
+
+n_trials = 10
+n_heads = 7
+
+# 似然函数: L(p) = C(10,7) * p^7 * (1-p)^3
+# 我们将 p 从 0 到 1 变化，找出使似然最大的 p
+
+from math import comb
+
+p_values = np.linspace(0.01, 0.99, 200)
+likelihoods = np.array([
+    comb(n_trials, n_heads) * (p**n_heads) * ((1-p)**(n_trials-n_heads))
+    for p in p_values
+])
+
+# MLE 估计
+mle_p = p_values[np.argmax(likelihoods)]
+print(f"MLE 估计的 p = {mle_p:.3f}")
+print(f"常识估计的 p = n_heads / n_trials = {n_heads}/{n_trials} = {n_heads/n_trials:.3f}")
+print(f"MLE 和常识估计一致: {np.isclose(mle_p, n_heads/n_trials, atol=1e-2)}")
+
+# 对数似然通常更方便（将乘积转为求和，数值更稳定）
+log_likelihoods = n_heads * np.log(p_values) + (n_trials - n_heads) * np.log(1 - p_values)
+mle_p_log = p_values[np.argmax(log_likelihoods)]
+print(f"\n对数似然 MLE: p = {mle_p_log:.3f}")
+print(f"对数变换不改变最大值位置，但避免了数值下溢")
+```
+
+### MLE 与损失函数的关系
+
+```python
+# 演示：MSE 损失是如何从 MLE 推导出来的
+# 假设: y = f(x; w) + ε, 其中 ε ~ N(0, σ^2)
+# 即: y|x ~ N(f(x; w), σ^2)
+# 似然: L(w) = Π (1/√(2πσ^2)) * exp(-(y_i - f(x_i;w))² / (2σ²))
+# 负对数似然 ≈ Σ (y_i - f(x_i;w))² = MSE!
+
+print("MSE 损失函数来自 MLE:")
+print()
+print("假设: y = f(x;w) + ε,  ε ~ N(0, σ²)")
+print()
+print("似然函数:")
+print("  L = Π (1/√(2πσ²)) exp(-(y_i-ŷ_i)²/(2σ²))")
+print()
+print("负对数似然 (NLL):")
+print("  -log L = (1/(2σ²)) Σ(y_i-ŷ_i)² + n log(√(2πσ²))")
+print("         ∝ Σ(y_i-ŷ_i)²     (常数项不影响优化)")
+print("         = MSE × n")
+print()
+print("结论: 最小化 MSE == 最大化高斯似然!")
+print("这就是为什么 MSE 是回归问题的默认损失函数。")
+print()
+
+# 类似地，交叉熵损失来自 Bernoulli/多项式分布的 MLE
+print("交叉熵损失函数来自 Bernoulli MLE:")
+print("  P(y|p) = p^y (1-p)^(1-y)  (Bernoulli)")
+print("  -log P = -[y log(p) + (1-y) log(1-p)]  (Binary Cross Entropy)")
+print()
+print("结论: 最小化交叉熵 == 最大化 Bernoulli/多项式似然!")
+print("这就是为什么交叉熵是分类问题的默认损失函数。")
+```
+
+## 7. 综合：概率视角下的 ML 训练
+
+```python
+# 用概率视角理解一个简单的二分类问题
+np.random.seed(42)
+
+# 生成数据：每个样本有 2 个特征
+n_samples = 100
+
+# 两个类别，分别来自不同的二维正态分布
+class_0 = np.random.multivariate_normal(
+    mean=[-1, -1], cov=[[1, 0.5], [0.5, 1]], size=n_samples//2
+)
+class_1 = np.random.multivariate_normal(
+    mean=[1, 1], cov=[[1, -0.3], [-0.3, 1]], size=n_samples//2
+)
+
+X = np.vstack([class_0, class_1])
+y = np.array([0] * (n_samples//2) + [1] * (n_samples//2))
+
+print(f"数据: {X.shape[0]} 个样本, {X.shape[1]} 个特征")
+print(f"类别分布: 0: {(y==0).sum()}, 1: {(y==1).sum()}")
+
+# 概率建模的思路:
+# 1. 模型输出 P(y=1|x) = σ(w·x + b)
+# 2. 似然 L = Π P(y_i|x_i; w, b)
+# 3. 训练: 最大化 L (等价于最小化 -log L = Cross Entropy)
+# 4. 推理: 选择 P(y|x) 最大的类别
+
+# 先验概率 (类别的比例)
+prior_0 = (y == 0).mean()
+prior_1 = (y == 1).mean()
+
+# 似然 (在每个类别下特征的均值)
+likelihood_mean_0 = X[y == 0].mean(axis=0)
+likelihood_mean_1 = X[y == 1].mean(axis=0)
+
+print(f"\n先验概率 P(y=0) = {prior_0:.2f}, P(y=1) = {prior_1:.2f}")
+print(f"特征均值 (类别 0): {np.round(likelihood_mean_0, 3)}")
+print(f"特征均值 (类别 1): {np.round(likelihood_mean_1, 3)}")
+
+# 贝叶斯分类器的直觉
+# P(y=1|x) ∝ P(x|y=1) * P(y=1)
+# 如果某个类别的似然 × 先验更大，就预测该类别
+print(f"\n概率视角总结:")
+print(f"1. 模型参数 θ 描述了数据生成过程")
+print(f"2. 训练 = 找到使观察数据最可能的 θ (MLE)")
+print(f"3. 推理 = 计算 P(y|x; θ) 并取 argmax")
+print(f"4. 损失函数的选择隐含了对数据的概率假设")
+```
+
+## 总结
+
+概率统计是机器学习的语言——理解了概率，就理解了模型在做什么、为什么这样做。
+
+1. **随机变量** 描述数据中的不确定性。离散用于分类标签，连续用于回归值和隐变量。
+
+2. **Bernoulli 分布** 对应二分类（Sigmoid 输出），**正态分布** 对应回归的噪声假设、权重初始化和 Batch Normalization。
+
+3. **协方差矩阵** 是 PCA 和特征选择的基础。特征向量指向数据方差最大的方向。
+
+4. **贝叶斯定理** 是更新信念的数学公式。朴素贝叶斯分类器、贝叶斯优化、概率图模型都建立在此之上。
+
+5. **最大似然估计 (MLE)** 连接了概率和优化：最小化交叉熵 = 最大化 Bernoulli 似然，最小化 MSE = 最大化高斯似然。**损失函数不是随意选择的——每种损失函数都隐含了对数据分布的假设。**
+
+6. **记住这个链条**：数据分布假设 -> 写出似然 -> 取负对数 -> 得到损失函数 -> 用梯度下降优化。这是理解所有 ML 训练的终极框架。
+
+---
+
+接下来：恭喜你完成了 Part 0 的所有预备知识！现在你已经掌握了进入 ML 核心内容所需的数学和编程基础。下一部分将开始真正的机器学习之旅。

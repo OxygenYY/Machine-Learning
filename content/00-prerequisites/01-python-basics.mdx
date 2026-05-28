@@ -1,0 +1,353 @@
+---
+title: "Python for Machine Learning"
+description: "掌握 Python 编程基础，包括数据类型、控制流、函数、类以及 ML 项目中最常用的 Python 特性"
+part: "00-prerequisites"
+order: 1
+difficulty: "beginner"
+estimatedMinutes: 45
+objectives:
+  - "熟练使用 Python 基本数据类型和容器"
+  - "掌握列表推导式和生成器表达式"
+  - "理解函数、lambda 和装饰器"
+  - "了解类与面向对象编程基础"
+  - "学会使用虚拟环境和 pip 管理依赖"
+prerequisites: []
+keywords:
+  - "python"
+  - "list comprehension"
+  - "virtualenv"
+  - "pip"
+---
+
+## 为什么需要 Python？
+
+Python 是机器学习和深度学习领域使用最广泛的语言。它的语法简洁、生态系统丰富，拥有 NumPy、PyTorch、scikit-learn 等强大库。
+
+## 1. 基本数据类型
+
+### 数值类型
+
+Python 内置了整数、浮点数和复数类型：
+
+```python
+x = 42               # int
+y = 3.14159          # float
+z = 1 + 2j           # complex
+
+print(type(x))       # <class 'int'>
+print(type(y))       # <class 'float'>
+```
+
+### 字符串
+
+字符串在数据预处理中经常使用：
+
+```python
+text = "Hello, Machine Learning!"
+
+# 字符串方法
+print(text.lower())       # hello, machine learning!
+print(text.upper())       # HELLO, MACHINE LEARNING!
+print(text.split(","))    # ['Hello', ' Machine Learning!']
+print("_".join(["a", "b", "c"]))  # a_b_c
+
+# f-string 格式化
+name = "PyTorch"
+version = 2.0
+print(f"{name} version {version}")  # PyTorch version 2.0
+```
+
+## 2. 容器类型
+
+### 列表 List
+
+列表是 ML 中最常用的数据结构之一：
+
+```python
+# 创建列表
+numbers = [1, 2, 3, 4, 5]
+mixed = [1, "hello", 3.14, True]
+
+# 索引与切片
+print(numbers[0])      # 1
+print(numbers[-1])     # 5 (最后一个)
+print(numbers[1:4])    # [2, 3, 4]
+print(numbers[::2])    # [1, 3, 5] (步长)
+```
+
+### 列表推导式 — ML 中最常用的技巧
+
+列表推导式是 Python 最优雅的特性之一，在数据处理和模型代码中随处可见：
+
+```python
+# 基础形式
+squares = [x ** 2 for x in range(10)]
+# [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
+# 带条件过滤
+evens = [x for x in range(20) if x % 2 == 0]
+
+# 嵌套循环
+pairs = [(x, y) for x in range(3) for y in range(3)]
+# [(0,0), (0,1), (0,2), (1,0), ...]
+
+# 实际应用：数据预处理
+data = [1.5, 2.3, None, 4.1, None, 5.0]
+cleaned = [x for x in data if x is not None]
+normalized = [x / max(cleaned) for x in cleaned]
+```
+
+### 元组 Tuple
+
+元组是不可变序列，常用于存储固定数据：
+
+```python
+# 坐标点
+point = (3, 4)
+x, y = point  # 解包
+
+# 函数返回多值
+def min_max(data):
+    return min(data), max(data)
+
+lo, hi = min_max([3, 1, 4, 1, 5, 9])
+```
+
+### 字典 Dict
+
+字典在 ML 中用于配置参数、存储模型状态等：
+
+```python
+# 模型配置
+config = {
+    "learning_rate": 0.001,
+    "batch_size": 32,
+    "epochs": 100,
+    "architecture": "CNN"
+}
+
+# 遍历
+for key, value in config.items():
+    print(f"{key}: {value}")
+
+# 字典推导式
+squares_dict = {x: x**2 for x in range(5)}
+# {0: 0, 1: 1, 2: 4, 3: 9, 4: 16}
+```
+
+### 集合 Set
+
+集合适用于去重和集合运算：
+
+```python
+labels_a = {"cat", "dog", "bird"}
+labels_b = {"dog", "fish", "cat"}
+
+print(labels_a & labels_b)  # 交集: {'cat', 'dog'}
+print(labels_a | labels_b)  # 并集: {'cat', 'dog', 'bird', 'fish'}
+print(labels_a - labels_b)  # 差集: {'bird'}
+```
+
+## 3. 控制流
+
+### 条件语句
+
+```python
+loss = 0.35
+
+if loss < 0.1:
+    status = "excellent"
+elif loss < 0.5:
+    status = "good"
+else:
+    status = "needs improvement"
+```
+
+### 循环
+
+```python
+# for 循环
+losses = [2.3, 1.5, 0.8, 0.4, 0.2]
+for epoch, loss in enumerate(losses):
+    print(f"Epoch {epoch}: loss = {loss:.4f}")
+
+# zip 同时遍历
+weights = [0.1, 0.2, 0.3]
+grads = [0.01, -0.02, 0.03]
+for w, g in zip(weights, grads):
+    w -= 0.01 * g  # 梯度下降更新
+```
+
+## 4. 函数
+
+### 基础函数
+
+```python
+def sigmoid(x):
+    """Sigmoid 激活函数"""
+    return 1 / (1 + 2.718281828459045 ** (-x))
+
+# 调用
+print(sigmoid(0))    # 0.5
+print(sigmoid(2))    # ~0.88
+```
+
+### Lambda 函数
+
+```python
+# Lambda 用于简单的单行函数
+square = lambda x: x ** 2
+
+# 在 ML 代码中常用于 transform
+pairs = [(1, "b"), (3, "a"), (2, "c")]
+sorted_pairs = sorted(pairs, key=lambda x: x[1])
+# [(3, 'a'), (1, 'b'), (2, 'c')]
+```
+
+### 默认参数与类型提示
+
+```python
+from typing import List, Optional
+
+def train(
+    model,
+    data: List[float],
+    lr: float = 0.001,
+    epochs: int = 100,
+    device: Optional[str] = None
+) -> List[float]:
+    """训练函数 — 返回每个 epoch 的 loss"""
+    losses = []
+    for epoch in range(epochs):
+        # 训练逻辑...
+        loss = 0.5 * (0.9 ** epoch)
+        losses.append(loss)
+        if epoch % 20 == 0:
+            print(f"Epoch {epoch}: loss = {loss:.4f}")
+    return losses
+```
+
+## 5. 类与面向对象
+
+在 PyTorch 中，所有模型都继承自 `nn.Module`，理解类的基本概念至关重要：
+
+```python
+class Model:
+    """简单的 ML 模型示例"""
+
+    def __init__(self, input_dim: int, output_dim: int):
+        """初始化模型参数"""
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.weights = [0.0] * (input_dim * output_dim)
+
+    def forward(self, x):
+        """前向传播"""
+        return sum(w * xi for w, xi in zip(self.weights, x))
+
+    def __repr__(self):
+        return f"Model({self.input_dim} -> {self.output_dim})"
+
+# 使用
+model = Model(input_dim=3, output_dim=1)
+print(model)  # Model(3 -> 1)
+```
+
+### 继承
+
+```python
+class CNNModel(Model):
+    """CNN 模型继承自基础 Model 类"""
+
+    def __init__(self, input_dim, output_dim, num_layers=3):
+        super().__init__(input_dim, output_dim)
+        self.num_layers = num_layers
+
+    def forward(self, x):
+        # CNN 特定的前向传播
+        out = super().forward(x)
+        return out
+
+cnn = CNNModel(784, 10, num_layers=5)
+print(cnn.num_layers)  # 5
+```
+
+## 6. 虚拟环境与包管理
+
+这是开始任何 ML 项目的第一步：
+
+```bash
+# 创建虚拟环境
+python -m venv ml_env
+
+# 激活虚拟环境
+# Windows:
+ml_env\Scripts\activate
+# macOS/Linux:
+source ml_env/bin/activate
+
+# 安装 PyTorch
+pip install torch torchvision
+
+# 安装其他常用包
+pip install numpy pandas matplotlib jupyter
+
+# 导出依赖
+pip freeze > requirements.txt
+
+# 从文件安装
+pip install -r requirements.txt
+```
+
+## 7. 实用技巧
+
+### enumerate 与自动索引
+
+```python
+classes = ["cat", "dog", "bird", "fish"]
+class_to_idx = {cls: idx for idx, cls in enumerate(classes)}
+# {'cat': 0, 'dog': 1, 'bird': 2, 'fish': 3}
+```
+
+### 生成器 — 节省内存
+
+处理大型数据集时，生成器可以大幅减少内存使用：
+
+```python
+def batch_generator(data, batch_size):
+    """生成器函数：逐个产生 batch"""
+    for i in range(0, len(data), batch_size):
+        yield data[i:i + batch_size]
+
+# 使用
+data = list(range(100))
+for batch in batch_generator(data, batch_size=16):
+    print(f"Processing batch of size {len(batch)}")
+```
+
+### 错误处理
+
+```python
+def safe_divide(a, b):
+    """在数据处理中处理可能的除零错误"""
+    try:
+        return a / b
+    except ZeroDivisionError:
+        return float("inf")
+    except TypeError:
+        print(f"Cannot divide {type(a)} by {type(b)}")
+        return None
+```
+
+## 总结
+
+本节涵盖了 ML 学习中最需要的 Python 基础知识。在后续课程中，这些技能会被反复使用。关键要掌握：
+
+1. **列表推导式** — 数据预处理的核心工具
+2. **函数和类** — PyTorch 模型的构建基础
+3. **字典和元组** — 配置管理和数据组织
+4. **虚拟环境** — 项目隔离的必备技能
+
+---
+
+下一节：[NumPy 基础](/lesson/numpy-fundamentals) — 学习科学计算的核心库。

@@ -1,0 +1,301 @@
+---
+title: "RNN 循环神经网络"
+description: "从时序数据的本质出发，理解循环连接、时间展开、梯度消失问题，并用 PyTorch 构建文本生成与情感分析模型。"
+part: "03-supervised-learning"
+order: 12
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "理解序列数据的特性和循环连接的数学原理"
+  - "掌握 RNN 的时间展开（unrolling）与 BPTT 算法"
+  - "理解梯度消失/爆炸的根本原因及其影响"
+  - "使用 nn.RNN 构建文本生成与时间序列预测模型"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra", "dnn-architecture"]
+keywords: ["RNN", "循环神经网络", "序列数据", "BPTT", "梯度消失", "隐藏状态"]
+---
+
+## 序列数据的挑战
+
+许多现实世界的数据是**序列**形式的：文本（词序列）、语音（帧序列）、时间序列（按时间排列的数值）、视频（帧序列）。序列的核心特征是**元素之间存在时间或顺序依赖**——前面的信息影响后面的理解。
+
+传统的前馈神经网络对所有输入独立处理，无法建模这种依赖。循环神经网络（Recurrent Neural Network, RNN）通过在时间步之间共享隐藏状态来解决这个问题。
+
+## 循环连接与隐藏状态
+
+RNN 的核心是一个**循环连接**：当前时间步的隐藏状态 $h_t$ 依赖于上一时间步的隐藏状态 $h_{t-1}$ 和当前输入 $x_t$：
+
+$$
+h_t = \tanh(W_h h_{t-1} + W_x x_t + b)
+$$
+
+$$
+y_t = W_y h_t + b_y
+$$
+
+其中 $W_h$、$W_x$、$W_y$ 在所有时间步**共享**——这就是参数共享在时间维度上的体现。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+# 手动实现一个 RNN 时间步
+def rnn_cell(x_t, h_prev, W_x, W_h, b):
+    """单个 RNN 单元的前向传播
+    x_t: (batch, input_size)
+    h_prev: (batch, hidden_size)
+    """
+    return torch.tanh(x_t @ W_x + h_prev @ W_h + b)
+
+# 测试
+batch_size, input_size, hidden_size = 4, 10, 20
+W_x = torch.randn(input_size, hidden_size) * 0.01
+W_h = torch.randn(hidden_size, hidden_size) * 0.01
+b = torch.zeros(hidden_size)
+
+x_t = torch.randn(batch_size, input_size)
+h_prev = torch.zeros(batch_size, hidden_size)
+h_t = rnn_cell(x_t, h_prev, W_x, W_h, b)
+print("单步 RNN 输出:", h_t.shape)  # (4, 20)
+```
+
+## 时间展开（Unrolling Through Time）
+
+将 RNN 沿时间轴展开，它等价于一个深度前馈网络，每层共享相同的权重。这使得我们可以用标准的反向传播算法训练 RNN——这就是**时间反向传播（Backpropagation Through Time, BPTT）**。
+
+```python
+def rnn_forward(X, h0, W_x, W_h, b):
+    """手动实现完整序列的 RNN 前向传播
+    X: (seq_len, batch, input_size) —— 整个序列
+    h0: (batch, hidden_size) —— 初始隐藏状态
+    返回: 所有时间步的输出和最终隐藏状态
+    """
+    seq_len = X.shape[0]
+    batch_size = X.shape[1]
+    hidden_size = h0.shape[1]
+
+    H = torch.zeros(seq_len + 1, batch_size, hidden_size)
+    H[0] = h0
+    outputs = []
+
+    for t in range(seq_len):
+        H[t+1] = rnn_cell(X[t], H[t], W_x, W_h, b)
+        outputs.append(H[t+1])
+
+    Y = torch.stack(outputs, dim=0)  # (seq_len, batch, hidden_size)
+    return Y, H[-1]
+
+# 测试完整序列
+seq_len = 5
+X_seq = torch.randn(seq_len, batch_size, input_size)
+h0 = torch.zeros(batch_size, hidden_size)
+Y, h_final = rnn_forward(X_seq, h0, W_x, W_h, b)
+print(f"序列输出: {Y.shape}, 最终隐藏状态: {h_final.shape}")
+```
+
+展开后可以看到：序列长度越长，网络越深，梯度需要传播的路径也越长——这正是梯度消失问题的根源。
+
+## 梯度消失与梯度爆炸
+
+在 BPTT 中，梯度需要反向传播跨越许多时间步。损失对早期时间步的梯度涉及连乘：
+
+$$
+\frac{\partial \mathcal{L}}{\partial h_t} = \frac{\partial \mathcal{L}}{\partial h_T} \prod_{k=t}^{T-1} \frac{\partial h_{k+1}}{\partial h_k}
+$$
+
+$\frac{\partial h_{k+1}}{\partial h_k}$ 的雅可比矩阵的特征值若小于 1，连乘后梯度趋近于 0（**梯度消失**）；若大于 1，梯度指数级增长（**梯度爆炸**）。
+
+```python
+# 实验验证：模拟 sigmoid 激活下的梯度衰减
+def simulate_gradient_decay(seq_len=50, lambda_max=0.9):
+    """模拟梯度在时间反向传播中的衰减"""
+    gradients = [1.0]
+    for t in range(seq_len):
+        gradients.append(gradients[-1] * lambda_max)
+    print(f"序列长度 {seq_len}, 梯度衰减到: {gradients[-1]:.10f}")
+    # 实际中可能衰减得更快（尤其是 sigmoid/tanh 饱和区）
+
+simulate_gradient_decay(50)  # 几乎为零
+simulate_gradient_decay(100, 0.95)  # 依然衰减严重
+```
+
+**梯度爆炸**可以用梯度裁剪（gradient clipping）缓解。**梯度消失**则需要更复杂的门控机制（LSTM、GRU）。
+
+## 截断时间反向传播（TBPTT）
+
+当序列非常长时，完整的 BPTT 计算代价过高。**截断 BPTT**将长序列切分为多个较短片段，每段独立进行 BPTT，隐藏状态跨段传递但梯度不回流。
+
+```python
+def truncated_bptt_example(seq, chunk_size=20):
+    """TBPTT 伪代码"""
+    h = None  # 初始隐藏状态
+    total_loss = 0.0
+    for i in range(0, seq.size(0), chunk_size):
+        chunk = seq[i:i + chunk_size]
+        # h 从上一 chunk 延续，但梯度在 chunk 边界截断
+        # 实际训练中: h = h.detach() 切断计算图
+        if h is not None:
+            h = h.detach()  # 关键：切断梯度
+        # output, h = model(chunk, h)
+        # loss.backward()
+    print(f"TBPTT: 将长度 {seq.size(0)} 的序列切分成 "
+          f"{(seq.size(0) + chunk_size - 1) // chunk_size} 个 chunk")
+    return total_loss
+
+# 伪序列
+fake_seq = torch.randn(100, 4, 128)
+truncated_bptt_example(fake_seq, chunk_size=20)
+```
+
+## 双向 RNN（Bidirectional RNN）
+
+标准 RNN 只能利用过去的信息。双向 RNN 同时运行两个 RNN：一个正向（从前往后）和一个反向（从后往前），将两者的隐藏状态拼接，使每个时间步都能获取全部上下文。
+
+```python
+class BiRNN(nn.Module):
+    """手动实现双向 RNN"""
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.W_x_f = nn.Parameter(torch.randn(input_size, hidden_size) * 0.01)
+        self.W_h_f = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
+        self.b_f = nn.Parameter(torch.zeros(hidden_size))
+        self.W_x_b = nn.Parameter(torch.randn(input_size, hidden_size) * 0.01)
+        self.W_h_b = nn.Parameter(torch.randn(hidden_size, hidden_size) * 0.01)
+        self.b_b = nn.Parameter(torch.zeros(hidden_size))
+        self.fc = nn.Linear(hidden_size * 2, output_size)
+
+    def forward(self, X):
+        # X: (seq_len, batch, input_size)
+        seq_len = X.size(0)
+        batch_size = X.size(1)
+
+        # 正向 RNN
+        h_forward = [torch.zeros(batch_size, self.W_x_f.size(1))]
+        for t in range(seq_len):
+            h = torch.tanh(X[t] @ self.W_x_f + h_forward[-1] @ self.W_h_f + self.b_f)
+            h_forward.append(h)
+        h_forward = torch.stack(h_forward[1:])  # 去掉 h0
+
+        # 反向 RNN
+        X_reversed = torch.flip(X, [0])
+        h_backward = [torch.zeros(batch_size, self.W_x_b.size(1))]
+        for t in range(seq_len):
+            h = torch.tanh(X_reversed[t] @ self.W_x_b + h_backward[-1] @ self.W_h_b + self.b_b)
+            h_backward.append(h)
+        h_backward = torch.flip(torch.stack(h_backward[1:]), [0])
+
+        # 拼接
+        combined = torch.cat([h_forward, h_backward], dim=-1)
+        return self.fc(combined)
+
+print("BiRNN 参数量:", sum(p.numel() for p in BiRNN(10, 20, 5).parameters()))
+```
+
+## PyTorch 内置 RNN
+
+`nn.RNN` 封装了完整的序列处理，支持多层、双向、dropout 等特性。
+
+```python
+# nn.RNN 基本用法
+rnn_layer = nn.RNN(
+    input_size=128,      # 每个时间步输入的特征维度
+    hidden_size=256,     # 隐藏状态的维度
+    num_layers=2,        # 堆叠的 RNN 层数
+    batch_first=True,    # 输入格式: (batch, seq_len, input_size)
+    dropout=0.3,         # 层间 dropout（num_layers > 1 时生效）
+    bidirectional=False, # 是否双向
+)
+
+# 输入: (batch, seq_len, input_size)
+x = torch.randn(16, 30, 128)
+# h0: (num_layers * num_directions, batch, hidden_size)
+h0 = torch.zeros(2, 16, 256)
+
+output, h_n = rnn_layer(x, h0)
+print("RNN 输出形状:", output.shape)    # (16, 30, 256)
+print("最终隐藏状态形状:", h_n.shape)   # (2, 16, 256)
+# output 包含所有时间步的隐藏状态
+# h_n 仅包含最后一层在每个时间步结束时的隐藏状态
+```
+
+## 应用一：字符级语言模型
+
+语言建模是最经典的 RNN 应用——给定前面的字符，预测下一个字符。
+
+```python
+class CharRNN(nn.Module):
+    """字符级语言模型"""
+    def __init__(self, vocab_size, embed_dim, hidden_size, num_layers=2):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.rnn = nn.RNN(embed_dim, hidden_size, num_layers,
+                          batch_first=True, dropout=0.3)
+        self.fc = nn.Linear(hidden_size, vocab_size)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+    def forward(self, x, h=None):
+        # x: (batch, seq_len) —— 字符索引
+        x = self.embedding(x)  # (batch, seq_len, embed_dim)
+        out, h = self.rnn(x, h)
+        out = self.fc(out)     # (batch, seq_len, vocab_size)
+        return out, h
+
+    def generate(self, start_char_idx, char_to_idx, idx_to_char,
+                 length=200, temperature=1.0):
+        """生成文本"""
+        self.eval()
+        device = next(self.parameters()).device
+        current = torch.tensor([[start_char_idx]], device=device)
+        h = None
+        generated = [idx_to_char[start_char_idx]]
+
+        with torch.no_grad():
+            for _ in range(length):
+                logits, h = self(current, h)
+                # temperature 控制随机性: <1.0 更确定, >1.0 更多样
+                probs = F.softmax(logits.squeeze() / temperature, dim=-1)
+                next_char = torch.multinomial(probs, 1)
+                generated.append(idx_to_char[next_char.item()])
+                current = next_char.unsqueeze(0)
+        return ''.join(generated)
+```
+
+## 应用二：时间序列预测
+
+RNN 也可用于数值时间序列的预测。以下是一个简单的示例：
+
+```python
+class TimeSeriesRNN(nn.Module):
+    """单变量时间序列预测"""
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2,
+                 output_size=1, dropout=0.2):
+        super().__init__()
+        self.rnn = nn.RNN(input_size, hidden_size, num_layers,
+                          batch_first=True, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        # x: (batch, seq_len, 1)
+        out, _ = self.rnn(x)
+        # 仅使用最后一个时间步的输出进行预测
+        # (多步预测可改为使用全部时间步)
+        return self.fc(out[:, -1, :])
+
+# 测试
+model = TimeSeriesRNN()
+x = torch.randn(32, 24, 1)  # batch=32, 24 个历史时间步
+pred = model(x)
+print("时间序列预测输出:", pred.shape)  # (32, 1)
+```
+
+## RNN 的局限与改进方向
+
+RNN 理论上可以处理任意长序列，但实践中存在以下限制：
+
+1. **梯度消失**使 RNN 无法学习远距离依赖（超过约 10-20 个时间步）
+2. **串行计算**使训练无法并行化——必须逐时间步计算
+3. **长期记忆缺失**：隐藏状态会被不断"覆盖"，早期信息容易被遗忘
+
+LSTM 和 GRU 通过门控机制解决了梯度消失问题（下节课内容）。而 Transformer 通过自注意力机制彻底摆脱了循环结构，实现了完全并行计算。

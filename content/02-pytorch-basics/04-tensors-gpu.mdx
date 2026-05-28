@@ -1,0 +1,469 @@
+---
+title: "GPU 张量与 CUDA 编程"
+description: "理解 CPU 与 GPU 的架构差异，掌握 GPU 张量的创建、移动和管理，学会编写设备无关的 PyTorch 代码"
+part: "02-pytorch-basics"
+order: 4
+difficulty: "beginner"
+estimatedMinutes: 25
+objectives:
+  - "理解为什么 GPU 能加速深度学习计算"
+  - "掌握检测 GPU 可用性和管理 GPU 设备的方法"
+  - "学会在 CPU 和 GPU 之间移动张量"
+  - "了解 GPU 内存管理的基础知识"
+  - "能够编写设备无关的 PyTorch 代码"
+  - "通过实际基准测试感受 GPU 加速效果"
+prerequisites: ["python-basics", "numpy-fundamentals", "pytorch-tensors"]
+keywords: ["GPU", "CUDA", "设备", "显存", "并行计算", "torch.cuda"]
+---
+
+## CPU 与 GPU：架构差异
+
+要理解为什么 GPU 能加速深度学习，首先要了解 CPU 和 GPU 设计理念的根本差异。
+
+### CPU（中央处理器）
+
+- 拥有少量（4-64 个）强大的核心，每个核心有复杂的控制逻辑和较大的缓存
+- 擅长处理复杂的串行任务和分支逻辑
+- 每个核心独立处理不同的指令流
+- 类比：少数几位博士，各自独立解决不同的问题
+
+### GPU（图形处理器）
+
+- 拥有数千个相对简单的计算核心
+- 设计目标是数据并行计算：同时对大量数据执行相同的操作
+- 擅长大规模矩阵运算、卷积等规则计算
+- 类比：数千名小学生，每人在不同数据上做相同的算术题
+
+### 为什么深度学习适合 GPU？
+
+```python
+import torch
+import time
+
+# 神经网络本质上是大量并行的矩阵运算
+# 例如：一个全连接层计算 output = input @ weight + bias
+
+# 输入 (batch_size, input_dim) @ 权重 (input_dim, output_dim)
+# 这里的矩阵乘法将大矩阵分解为成千上万个独立的乘加操作
+# 这恰好是 GPU 最擅长的场景
+
+batch_size = 64
+input_dim = 1024
+output_dim = 512
+
+# 模拟一次前向传播的计算量
+x = torch.randn(batch_size, input_dim)
+w = torch.randn(input_dim, output_dim)
+
+# 这个矩阵乘法涉及 64 * 1024 * 512 = 33,554,432 次乘加运算
+# GPU 可以同时进行数千次运算，而 CPU 只能串行或小规模并行
+num_ops = batch_size * input_dim * output_dim
+print(f"单次矩阵乘法的乘加运算次数: {num_ops:,}")
+print(f"这正好是 GPU 高度并行的理想工作负载")
+```
+
+## 检测 GPU 环境
+
+在开始使用 GPU 之前，需要确认 GPU 是否可用以及了解其规格。
+
+```python
+import torch
+import sys
+
+print("=== GPU 环境检测 ===\n")
+
+# 1. 基本信息
+print(f"PyTorch 版本: {torch.__version__}")
+print(f"Python 版本:  {sys.version.split()[0]}\n")
+
+# 2. CUDA 可用性
+cuda_available = torch.cuda.is_available()
+print(f"CUDA 是否可用: {cuda_available}")
+
+if cuda_available:
+    # 3. GPU 详细信息
+    print(f"\n--- GPU 详细信息 ---")
+    print(f"CUDA 版本:       {torch.version.cuda}")
+    print(f"cuDNN 版本:      {torch.backends.cudnn.version()}")
+    print(f"cuDNN 已启用:    {torch.backends.cudnn.enabled}")
+    print(f"GPU 数量:        {torch.cuda.device_count()}")
+
+    for i in range(torch.cuda.device_count()):
+        print(f"\n  GPU {i}:")
+        print(f"    名称:        {torch.cuda.get_device_name(i)}")
+        print(f"    计算能力:    {torch.cuda.get_device_capability(i)}")
+        props = torch.cuda.get_device_properties(i)
+        print(f"    总显存:      {props.total_mem / 1024**3:.2f} GB")
+        print(f"    多处理器数:  {props.multi_processor_count}")
+        print(f"    最大线程数:  {props.multi_processor_count * 1024}")
+
+    # 4. 当前设备
+    print(f"\n--- 当前设备 ---")
+    print(f"当前 GPU 索引:  {torch.cuda.current_device()}")
+    print(f"当前 GPU 名称:  {torch.cuda.get_device_name()}")
+
+    # 5. 设置默认 GPU
+    # torch.cuda.set_device(0)  # 选择 GPU 0 为默认设备
+else:
+    print("\n未检测到 CUDA 支持的 GPU。")
+    print("可能的原因：")
+    print("  1. 没有 NVIDIA 显卡")
+    print("  2. 没有安装 NVIDIA 驱动")
+    print("  3. 安装了 CPU-only 版本的 PyTorch")
+    print("  4. CUDA 版本与驱动不兼容")
+
+# 6. MPS (Apple Silicon) 检测
+print(f"\n--- Apple Silicon (MPS) ---")
+if torch.backends.mps.is_available():
+    print("MPS 可用 (Apple Silicon GPU)")
+    print(f"后端已构建: {torch.backends.mps.is_built()}")
+else:
+    print("MPS 不可用 (非 Apple Silicon 设备或 PyTorch 版本过旧)")
+```
+
+## 在 GPU 上操作张量
+
+```python
+import torch
+
+# === 方法1：创建时指定 device ===
+x_gpu = torch.randn(3, 4, device="cuda")
+print(f"直接在 GPU 创建: device={x_gpu.device}, shape={x_gpu.shape}")
+
+# === 方法2：用 device 对象（推荐，代码更清晰）===
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+x = torch.randn(3, 4, device=device)
+print(f"用 device 对象创建: {x.device}")
+
+# === 方法3：用 .to() 方法移动 ===
+x_cpu = torch.randn(3, 4)  # 默认在 CPU
+x_moved = x_cpu.to("cuda")
+print(f".to('cuda') 移动: {x_moved.device}")
+
+# .to() 也可以改变数据类型
+x_float16 = x_cpu.to(device="cuda", dtype=torch.float16)
+print(f".to(device, dtype): device={x_float16.device}, dtype={x_float16.dtype}")
+
+# === 方法4：用 .cuda() 方法（旧式写法）===
+x_old_style = x_cpu.cuda()  # 功能与 .to('cuda') 相同
+print(f".cuda() 方法: {x_old_style.device}")
+
+# === 从 GPU 移回 CPU ===
+x_back_to_cpu = x_gpu.cpu()
+print(f"移回 CPU: {x_back_to_cpu.device}")
+
+# === 多 GPU 场景 ===
+if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+    # 指定具体 GPU
+    x_gpu0 = torch.randn(3, 3, device="cuda:0")
+    x_gpu1 = torch.randn(3, 3, device="cuda:1")
+    print(f"\n多 GPU:")
+    print(f"  x_gpu0 在: {x_gpu0.device}")
+    print(f"  x_gpu1 在: {x_gpu1.device}")
+
+    # 在不同 GPU 间移动
+    x_moved = x_gpu0.to("cuda:1")
+    print(f"  GPU 0 -> GPU 1: {x_moved.device}")
+```
+
+## 混合 CPU/GPU 张量的常见错误
+
+这是初学者最容易遇到的问题之一：对位于不同设备上的张量进行运算会导致运行时错误。
+
+```python
+import torch
+
+if torch.cuda.is_available():
+    # 创建一个 CPU 张量和一个 GPU 张量
+    x_cpu = torch.randn(3, 3)
+    x_gpu = torch.randn(3, 3, device="cuda")
+
+    print(f"x_cpu 在: {x_cpu.device}")
+    print(f"x_gpu 在: {x_gpu.device}")
+
+    # 尝试对它们进行运算会导致错误
+    try:
+        result = x_cpu + x_gpu
+    except RuntimeError as e:
+        print(f"\n错误！不能混合 CPU 和 GPU 张量:")
+        print(f"  {e}")
+
+    # 正确做法：确保所有张量在同一设备上
+    # 方案A：将 CPU 张量移到 GPU
+    x_cpu_moved = x_cpu.to("cuda")
+    result_a = x_cpu_moved + x_gpu
+    print(f"\n方案A (移到GPU): {result_a.device}")
+
+    # 方案B：将 GPU 张量移到 CPU
+    x_gpu_moved = x_gpu.cpu()
+    result_b = x_cpu + x_gpu_moved
+    print(f"方案B (移到CPU): {result_b.device}")
+
+    # 检查张量是否在 CUDA 上
+    print(f"\n张量是否在 CUDA 上:")
+    print(f"  x_cpu.is_cuda: {x_cpu.is_cuda}")
+    print(f"  x_gpu.is_cuda: {x_gpu.is_cuda}")
+```
+
+## GPU 内存管理
+
+显存（VRAM）是 GPU 上最宝贵的资源。了解如何监控和管理显存对于训练大型模型至关重要。
+
+```python
+import torch
+
+if torch.cuda.is_available():
+    # === 查看显存使用情况 ===
+    print("=== GPU 显存状态 ===\n")
+
+    # 已分配的显存（当前正在使用的）
+    allocated = torch.cuda.memory_allocated()
+    print(f"已分配显存: {allocated / 1024**2:.2f} MB")
+
+    # 由缓存分配器保留的显存（PyTorch 预留但未使用的）
+    cached = torch.cuda.memory_reserved()
+    print(f"缓存显存:   {cached / 1024**2:.2f} MB")
+
+    # 总显存
+    total = torch.cuda.get_device_properties(0).total_mem
+    print(f"总显存:     {total / 1024**3:.2f} GB")
+    print(f"可用显存:   {(total - allocated) / 1024**3:.2f} GB")
+
+    # === 显存分配示例 ===
+    print(f"\n--- 分配张量后的显存变化 ---")
+
+    # 分配一个大张量 1000x1000 float32 = 4,000,000 字节 ≈ 3.81 MB
+    x = torch.randn(1000, 1000, device="cuda")
+    after_alloc = torch.cuda.memory_allocated()
+    print(f"分配 1000x1000 张量后: {after_alloc / 1024**2:.2f} MB")
+    print(f"增加了: {(after_alloc - allocated) / 1024**2:.2f} MB")
+
+    # === 释放显存 ===
+    # 删除张量引用
+    del x
+    # PyTorch 的缓存分配器可能不会立即归还显存给操作系统
+    after_del = torch.cuda.memory_allocated()
+    print(f"\n删除张量后已分配: {after_del / 1024**2:.2f} MB")
+
+    # 清空缓存（释放 PyTorch 预留但未使用的显存）
+    torch.cuda.empty_cache()
+    after_empty = torch.cuda.memory_allocated()
+    cached_after = torch.cuda.memory_reserved()
+    print(f"empty_cache() 后:")
+    print(f"  已分配: {after_empty / 1024**2:.2f} MB")
+    print(f"  已缓存: {cached_after / 1024**2:.2f} MB")
+
+    # === 获取显存统计信息 ===
+    print(f"\n--- 显存统计 ---")
+    stats = torch.cuda.memory_stats()
+    print(f"分配次数:     {stats.get('allocation.all.allocated', 'N/A')}")
+    print(f"释放次数:     {stats.get('allocation.all.freed', 'N/A')}")
+    print(f"当前分配块数: {stats.get('allocated_bytes.all.current', 'N/A')}")
+```
+
+### 显存泄漏检测
+
+```python
+# 检测显存是否泄漏的简单方法
+def check_memory_leak():
+    torch.cuda.empty_cache()
+    baseline = torch.cuda.memory_allocated()
+
+    # 执行一些操作
+    for _ in range(100):
+        x = torch.randn(100, 100, device="cuda")
+        y = x @ x.T
+        del x, y  # 显式删除
+
+    after = torch.cuda.memory_allocated()
+    leaked = after - baseline
+    if leaked > 1024:  # 超过 1KB 可能泄漏
+        print(f"⚠️ 可能的显存泄漏: {leaked / 1024:.2f} KB")
+    else:
+        print(f"✅ 没有显存泄漏 (差异: {leaked} bytes)")
+
+if torch.cuda.is_available():
+    check_memory_leak()
+```
+
+## 性能对比：CPU vs GPU
+
+让我们通过实际的矩阵乘法基准测试来直观感受 GPU 的加速效果。
+
+```python
+import torch
+import time
+
+def benchmark_matmul(size, device, iterations=50):
+    """对指定大小的矩阵乘法进行基准测试"""
+    # 创建张量
+    a = torch.randn(size, size, device=device)
+    b = torch.randn(size, size, device=device)
+
+    # 预热（首次调用可能有额外的初始化开销）
+    for _ in range(5):
+        _ = a @ b
+
+    # 同步 GPU 操作后再计时
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+
+    # 正式计时
+    start = time.perf_counter()
+    for _ in range(iterations):
+        _ = a @ b
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    end = time.perf_counter()
+
+    avg_time = (end - start) / iterations * 1000  # 毫秒
+    return avg_time
+
+if torch.cuda.is_available():
+    sizes = [256, 512, 1024, 2048, 4096]
+    results = []
+
+    print(f"{'矩阵大小':>12} {'CPU (ms)':>12} {'GPU (ms)':>12} {'加速比':>10}")
+    print("-" * 50)
+
+    for size in sizes:
+        # GPU 基准测试
+        gpu_time = benchmark_matmul(size, "cuda") if size <= 4096 else float('nan')
+
+        # CPU 基准测试（大矩阵会很慢）
+        cpu_time = benchmark_matmul(size, "cpu", iterations=10)
+
+        speedup = cpu_time / gpu_time if gpu_time > 0 else 0
+        print(f"{size:>12} {cpu_time:>12.2f} {gpu_time:>12.2f} {speedup:>9.1f}x")
+
+    print("\n结论：矩阵越大，GPU 加速效果越明显")
+    print("原因：大矩阵能更好地利用 GPU 的并行计算能力")
+    print("      同时 CPU 的大矩阵计算受到缓存大小和内存带宽的限制")
+```
+
+### 其他操作的 GPU 加速
+
+```python
+# GPU 加速不仅限于矩阵乘法，几乎所有张量操作都能在 GPU 上加速
+
+if torch.cuda.is_available():
+    n = 10_000_000  # 一千万个元素
+
+    # CPU 上的操作
+    x_cpu = torch.randn(n)
+    start = time.perf_counter()
+    y_cpu = torch.sin(x_cpu) + torch.cos(x_cpu) * torch.exp(x_cpu * 0.01)
+    cpu_time = time.perf_counter() - start
+
+    # GPU 上的操作
+    x_gpu = torch.randn(n, device="cuda")
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    y_gpu = torch.sin(x_gpu) + torch.cos(x_gpu) * torch.exp(x_gpu * 0.01)
+    torch.cuda.synchronize()
+    gpu_time = time.perf_counter() - start
+
+    print(f"\n一千万元素的逐元素运算:")
+    print(f"  CPU 耗时: {cpu_time*1000:.2f} ms")
+    print(f"  GPU 耗时: {gpu_time*1000:.2f} ms")
+    print(f"  加速比:   {cpu_time/gpu_time:.1f}x")
+```
+
+## 编写设备无关代码的最佳实践
+
+在项目开发中，建议从一开始就采用设备无关的编码风格。
+
+```python
+import torch
+
+# === 最佳实践1：定义一个全局设备变量 ===
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"使用设备: {device}")
+
+# === 最佳实践2：创建张量时始终指定 device ===
+# ❌ 不好的做法
+x = torch.randn(3, 3)  # 隐式在 CPU 上创建
+
+# ✅ 好的做法
+x = torch.randn(3, 3, device=device)
+
+# === 最佳实践3：创建模型时指定 device ===
+# （后续 nn.Module 课程会详细介绍）
+# model = MyModel().to(device)
+
+# === 最佳实践4：加载数据时指定 device ===
+# for batch_data, batch_labels in dataloader:
+#     batch_data = batch_data.to(device)
+#     batch_labels = batch_labels.to(device)
+
+# === 最佳实践5：编写设备无关的函数 ===
+def create_noise(batch_size, dim, device=None):
+    """生成噪声张量，自动使用正确的设备"""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.randn(batch_size, dim, device=device)
+
+noise = create_noise(4, 64)
+print(f"噪声张量在: {noise.device}")
+
+# === 最佳实践6：支持多 GPU 时使用 DataParallel 或 DDP ===
+# 这个在高级课程中会详细讲解
+def get_device_for_training():
+    if torch.cuda.is_available():
+        if torch.cuda.device_count() > 1:
+            print(f"检测到 {torch.cuda.device_count()} 块 GPU，"
+                  f"可以使用 DataParallel 进行多 GPU 训练")
+        return torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        return torch.device("mps")
+    else:
+        return torch.device("cpu")
+
+train_device = get_device_for_training()
+print(f"训练设备: {train_device}")
+
+# === 最佳实践7：在 CPU 上进行非数值运算 ===
+# 标量值、配置参数等不需要 GPU 加速的数据保持在 CPU 上
+# 这有助于减少 GPU 显存的不必要消耗
+```
+
+### 常见的设备管理工具函数
+
+```python
+def to_device(data, device):
+    """递归将数据（张量、列表、元组、字典）移到指定设备"""
+    if isinstance(data, torch.Tensor):
+        return data.to(device)
+    elif isinstance(data, (list, tuple)):
+        return type(data)(to_device(item, device) for item in data)
+    elif isinstance(data, dict):
+        return {key: to_device(value, device) for key, value in data.items()}
+    else:
+        return data  # 非张量数据原样返回
+
+# 使用示例
+sample = {
+    "image": torch.randn(3, 224, 224),
+    "label": torch.tensor(5),
+    "metadata": "cat photo"  # 非张量数据，不会被移动
+}
+
+if torch.cuda.is_available():
+    sample_gpu = to_device(sample, torch.device("cuda"))
+    print(f"移动到 GPU 后:")
+    print(f"  image 设备: {sample_gpu['image'].device}")
+    print(f"  label 设备: {sample_gpu['label'].device}")
+    print(f"  metadata: {sample_gpu['metadata']}")  # 字符串不变
+```
+
+## 本节小结
+
+- CPU 有少量强大的核心，GPU 有数千个简单核心，适合大规模并行计算
+- 深度学习中的矩阵运算恰好是 GPU 最擅长的工作负载
+- 使用 `torch.cuda.is_available()` 检测 GPU 可用性
+- 通过 `.to(device)`, `.cuda()`, `.cpu()` 在设备间移动张量
+- **绝对不能**混合使用不同设备上的张量进行运算
+- 使用 `torch.cuda.memory_allocated()` 监控显存使用
+- `torch.cuda.empty_cache()` 释放 PyTorch 缓存的显存
+- 养成编写设备无关代码的习惯：定义全局 `device` 变量，始终显式指定设备
+- 矩阵越大，GPU 相比 CPU 的加速效果越显著

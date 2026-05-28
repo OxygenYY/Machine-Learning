@@ -1,0 +1,379 @@
+---
+title: "多分类问题：Softmax 与交叉熵"
+description: "从二分类到多分类：Softmax 函数、CrossEntropyLoss、One-vs-Rest 策略与 Iris 数据集实战"
+part: "03-supervised-learning"
+order: 5
+difficulty: "intermediate"
+estimatedMinutes: 35
+objectives:
+  - "理解 Softmax 函数的定义、性质与数值稳定性技巧"
+  - "掌握 CrossEntropyLoss = LogSoftmax + NLLLoss 的关系"
+  - "了解 One-vs-Rest 与 One-vs-One 多分类策略"
+  - "在 Iris 数据集上构建三分类模型"
+  - "可视化多分类决策区域并计算 Top-k 准确率"
+prerequisites: ["logistic-regression-theory", "logistic-regression-pytorch", "linear-algebra"]
+keywords: ["softmax", "cross-entropy", "multiclass", "iris", "one-vs-rest"]
+---
+
+# 一、从二分类到多分类
+
+二分类逻辑回归输出一个概率 $p$，另一类的概率为 $1-p$。当类别数 $K > 2$ 时，我们需要一个能够输出 $K$ 个概率值的函数，满足：
+
+1. 每个概率 $p_k \in (0, 1)$
+2. 所有概率之和为 1：$\sum_{k=1}^{K} p_k = 1$
+3. 可导，适合梯度优化
+
+这个函数就是 **Softmax**。
+
+# 二、Softmax 函数
+
+## 数学定义
+
+给定 $K$ 个 logits（未归一化的分数）$z_1, z_2, \ldots, z_K$，Softmax 函数定义为：
+
+$$\text{Softmax}(z_k) = \frac{e^{z_k}}{\sum_{j=1}^{K} e^{z_j}}$$
+
+## 关键性质
+
+1. **归一化**：$\sum_{k} \text{Softmax}(z_k) = 1$，输出是合法的概率分布。
+2. **保序性**：Softmax 是单调函数，logit 较大的类获得较高的概率。即 $z_i > z_j \implies p_i > p_j$。
+3. **平移不变性**：给所有 logits 加上同一个常数 $c$，输出不变：$\text{Softmax}(z_k + c) = \text{Softmax}(z_k)$。
+4. **可微性**：雅可比矩阵的元素为：
+
+$$\frac{\partial p_i}{\partial z_j} = \begin{cases} p_i (1 - p_i) & \text{if } i = j \\ -p_i p_j & \text{if } i \neq j \end{cases}$$
+
+## 数值稳定性：减去最大值
+
+直接计算 $e^{z_k}$ 可能溢出（当 $z_k$ 很大时）。标准的数值稳定技巧是减去最大值：
+
+$$\text{Softmax}(z_k) = \frac{e^{z_k - \max(\mathbf{z})}}{\sum_{j=1}^{K} e^{z_j - \max(\mathbf{z})}}$$
+
+这不改变结果（平移不变性），但保证最大指数不超过 $e^0 = 1$。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 演示数值稳定性
+z = torch.tensor([1000.0, 1001.0, 1002.0])
+
+# 不安全的方式——直接 exp 会溢出
+# torch.exp(z)  # 这会溢出!
+
+# 安全的方式：减去最大值
+z_stable = z - z.max()
+probs = torch.exp(z_stable) / torch.exp(z_stable).sum()
+print(f"Logits: {z}")
+print(f"稳定 logits (减最大值): {z_stable}")
+print(f"Softmax 概率: {probs}")
+print(f"概率和: {probs.sum():.4f}")
+print(f"最可能类别: {probs.argmax().item()}")
+```
+
+## 直观理解
+
+Softmax 做的是"指数归一化"。指数函数将差距放大，使得较大 logit 对应的概率显著更大。当 $z_{\max} \gg z_{\text{others}}$ 时，概率集中在最大的那个类上（接近于 one-hot 分布）。
+
+```python
+# 可视化：温度参数对 Softmax 的影响
+logits = torch.tensor([1.0, 2.0, 3.0, 0.5, 1.5])
+
+def softmax_with_temperature(z, T=1.0):
+    z = (z - z.max()) / T
+    return torch.exp(z) / torch.exp(z).sum()
+
+temperatures = [0.1, 0.5, 1.0, 2.0, 10.0]
+fig, axes = plt.subplots(1, len(temperatures), figsize=(15, 3))
+
+for i, T in enumerate(temperatures):
+    probs = softmax_with_temperature(logits, T)
+    axes[i].bar(range(len(probs)), probs.numpy())
+    axes[i].set_title(f'T = {T}')
+    axes[i].set_xlabel('Class')
+    axes[i].set_ylim(0, 1.0)
+    if i == 0:
+        axes[i].set_ylabel('Probability')
+plt.suptitle('Softmax with Different Temperatures')
+plt.tight_layout()
+plt.show()
+```
+
+**温度（Temperature）$T$** 用于控制分布的"尖锐"程度：
+- $T \to 0$：趋向于 one-hot 分布（硬决策），概率集中在一个类上。
+- $T \to \infty$：趋向于均匀分布，所有类的概率相等。
+
+# 三、交叉熵损失
+
+## 定义
+
+对于多分类，交叉熵损失将真实标签（one-hot 编码或类别索引）与预测概率进行比较：
+
+$$\mathcal{L}_{\text{CE}} = -\frac{1}{n}\sum_{i=1}^{n} \sum_{k=1}^{K} y_k^{(i)} \log \hat{y}_k^{(i)}$$
+
+其中 $y_k^{(i)}$ 是样本 $i$ 在类别 $k$ 上的真实概率（通常是 one-hot），$\hat{y}_k^{(i)} = \text{Softmax}(z_k^{(i)})$ 是预测概率。
+
+当使用类别索引（如 $y^{(i)} \in \{0, 1, \ldots, K-1\}$）时，上式简化为：
+
+$$\mathcal{L}_{\text{CE}} = -\frac{1}{n}\sum_{i=1}^{n} \log \hat{y}_{y^{(i)}}^{(i)}$$
+
+即只取正确类别对应的对数概率的负值。
+
+## PyTorch 中的 CrossEntropyLoss
+
+`nn.CrossEntropyLoss` 内部等价于 `LogSoftmax + NLLLoss`：
+
+```python
+# 三个等效的写法
+
+# 方法 1（推荐）：直接使用 CrossEntropyLoss
+criterion = nn.CrossEntropyLoss()
+loss_1 = criterion(logits, labels)  # logits 未归一化, labels 是类别索引
+
+# 方法 2：LogSoftmax + NLLLoss
+loss_2 = nn.NLLLoss()(nn.LogSoftmax(dim=1)(logits), labels)
+
+# 方法 3：手动计算
+probs = F.softmax(logits, dim=1)
+loss_3 = -torch.mean(torch.log(probs[range(len(labels)), labels]))
+
+print(f"CrossEntropyLoss:       {loss_1.item():.6f}")
+print(f"LogSoftmax + NLLLoss:   {loss_2.item():.6f}")
+print(f"Manual:                 {loss_3.item():.6f}")
+```
+
+**关键约定**：`nn.CrossEntropyLoss` 的输入必须是**未归一化的 logits**（不需要自己套 Softmax），标签是**类别索引**（LongTensor），不是 one-hot 编码。
+
+# 四、多分类策略：One-vs-Rest 与 One-vs-One
+
+除了 Softmax 回归外，将二分类器扩展为多分类器还有两种传统策略：
+
+## One-vs-Rest (OvR)
+
+为每个类别训练一个二分类器：类别 $k$ vs 其他所有类别。共训练 $K$ 个分类器。预测时将样本分给得分最高的那个分类器对应的类别。
+
+- 优点：简单，训练 $K$ 个独立的二分类器。
+- 缺点：每个分类器的训练数据不平衡（正负样本比例约为 $1:(K-1)$）。
+
+## One-vs-One (OvO)
+
+为每对类别训练一个二分类器：共 $\frac{K(K-1)}{2}$ 个分类器。预测时进行"投票"，每个分类器为两个候选类之一投票，得票最多的类别胜出。
+
+- 优点：每个分类器只处理两个类别，数据平衡。
+- 缺点：需要训练 $\mathcal{O}(K^2)$ 个分类器，$K$ 大时开销巨大。
+
+**Softmax 回归（Multinomial Logistic Regression）** 直接建模 $K$ 个类别的联合概率分布，通常优于 OvR 和 OvO（特别是用神经网络实现时），是当前的主流方法。
+
+# 五、Iris 数据集实战
+
+Iris 数据集包含 3 种鸢尾花，每种 50 个样本，每个样本有 4 个特征（花萼长、宽，花瓣长、宽）。
+
+```python
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+
+# 加载数据
+iris = load_iris()
+X_np, y_np = iris.data, iris.target  # (150, 4), (150,)
+feature_names = iris.feature_names
+class_names = iris.target_names
+
+print(f"数据集: {X_np.shape[0]} 样本, {X_np.shape[1]} 特征, {len(class_names)} 类别")
+print(f"类别: {class_names}")
+print(f"每类样本数: {np.bincount(y_np)}")
+
+# 标准化（对逻辑回归/Softmax 收敛很重要）
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_np)
+
+# 划分
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y_np, test_size=0.3, random_state=42, stratify=y_np)
+
+X_train_t = torch.tensor(X_train, dtype=torch.float32)
+X_test_t = torch.tensor(X_test, dtype=torch.float32)
+y_train_t = torch.tensor(y_train, dtype=torch.long)   # 类别索引，LongTensor!
+y_test_t = torch.tensor(y_test, dtype=torch.long)
+```
+
+## 模型定义与训练
+
+```python
+class SoftmaxRegression(nn.Module):
+    def __init__(self, input_dim, num_classes):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, num_classes)  # 输出 K 个 logits
+        # 注意：不需要 Softmax！CrossEntropyLoss 内部会处理
+
+    def forward(self, x):
+        return self.linear(x)  # 返回 logits
+
+num_classes = len(class_names)
+model = SoftmaxRegression(input_dim=4, num_classes=num_classes)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.SGD(model.parameters(), lr=0.1)
+
+# 训练
+n_epochs = 300
+train_losses, test_accs = [], []
+
+for epoch in range(n_epochs):
+    model.train()
+    logits = model(X_train_t)
+    loss = criterion(logits, y_train_t)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    train_losses.append(loss.item())
+
+    # 每 50 轮评估
+    if epoch % 50 == 0:
+        model.eval()
+        with torch.no_grad():
+            test_logits = model(X_test_t)
+            test_preds = test_logits.argmax(dim=1)
+            acc = (test_preds == y_test_t).float().mean().item()
+            test_accs.append(acc)
+        print(f"Epoch {epoch:3d}: Loss={loss.item():.4f}, Test Acc={acc:.3f}")
+
+print(f"\n最终测试准确率: {test_accs[-1] if test_accs else 'N/A'}")
+```
+
+# 六、可视化决策区域
+
+为了可视化，我们只用 Iris 的前两个特征（2D 特征空间）：
+
+```python
+# 仅使用前两个特征来可视化
+X_2d = X_scaled[:, :2]
+X_train_2d, X_test_2d, y_train_2d, y_test_2d = train_test_split(
+    X_2d, y_np, test_size=0.3, random_state=42, stratify=y_np)
+
+X_train_2d_t = torch.tensor(X_train_2d, dtype=torch.float32)
+X_test_2d_t = torch.tensor(X_test_2d, dtype=torch.float32)
+y_train_2d_t = torch.tensor(y_train_2d, dtype=torch.long)
+y_test_2d_t = torch.tensor(y_test_2d, dtype=torch.long)
+
+# 训练 2D 模型
+model_2d = nn.Linear(2, num_classes)
+criterion_2d = nn.CrossEntropyLoss()
+optimizer_2d = optim.SGD(model_2d.parameters(), lr=0.1)
+
+for epoch in range(500):
+    optimizer_2d.zero_grad()
+    loss = criterion_2d(model_2d(X_train_2d_t), y_train_2d_t)
+    loss.backward()
+    optimizer_2d.step()
+
+# 绘制决策区域
+def plot_multiclass_decision_boundary(model, X, y, class_names, title):
+    model.eval()
+    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+    xx, yy = np.meshgrid(np.linspace(x_min, x_max, 300),
+                         np.linspace(y_min, y_max, 300))
+
+    grid = torch.tensor(np.c_[xx.ravel(), yy.ravel()], dtype=torch.float32)
+    with torch.no_grad():
+        logits = model(grid)
+        preds = logits.argmax(dim=1).reshape(xx.shape)
+
+    plt.figure(figsize=(8, 6))
+    plt.contourf(xx, yy, preds.numpy(), alpha=0.4, cmap='RdYlBu',
+                 levels=np.arange(-0.5, num_classes, 1))
+    colors = ['blue', 'red', 'green']
+    for k in range(num_classes):
+        mask = (y.numpy() if isinstance(y, np.ndarray) else y.numpy()) == k
+        plt.scatter(X[mask, 0], X[mask, 1], c=colors[k], label=class_names[k],
+                   edgecolors='k', linewidth=0.5, s=40, alpha=0.8)
+    plt.xlabel('Feature 1 (Standardized)')
+    plt.ylabel('Feature 2 (Standardized)')
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_multiclass_decision_boundary(
+    model_2d, X_test_2d, y_test_2d_t, class_names,
+    "Softmax Regression: 3-Class Decision Regions (2D features)")
+```
+
+# 七、Top-k 准确率
+
+有时候只看 Top-1 准确率过于严格。Top-k 准确率衡量"正确类别是否在模型预测的前 $k$ 名中"。
+
+```python
+def topk_accuracy(logits, targets, k=1):
+    """计算 Top-k 准确率"""
+    with torch.no_grad():
+        # 获取概率最高的 k 个类别的索引
+        _, topk_indices = torch.topk(logits, k, dim=1)
+        # 检查 targets 是否在 top-k 中
+        correct = topk_indices.eq(targets.unsqueeze(1).expand_as(topk_indices))
+        # 每个样本只要有一个匹配就算对
+        correct_per_sample = correct.any(dim=1).float()
+        return correct_per_sample.mean().item()
+
+model.eval()
+with torch.no_grad():
+    test_logits = model(X_test_t)
+    print(f"Top-1 准确率: {topk_accuracy(test_logits, y_test_t, k=1):.4f}")
+    print(f"Top-2 准确率: {topk_accuracy(test_logits, y_test_t, k=2):.4f}")
+    print(f"Top-3 准确率: {topk_accuracy(test_logits, y_test_t, k=3):.4f}")
+# 注意：3 类问题中，Top-3 准确率必定是 1.0
+```
+
+# 八、完整评估与混淆矩阵
+
+```python
+model.eval()
+with torch.no_grad():
+    test_logits = model(X_test_t)
+    test_probs = F.softmax(test_logits, dim=1)
+    test_preds = test_logits.argmax(dim=1).numpy()
+
+# 混淆矩阵
+cm = confusion_matrix(y_test, test_preds)
+print("混淆矩阵:")
+print(cm)
+
+# 使用 sklearn 的可视化
+from sklearn.metrics import ConfusionMatrixDisplay
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+ConfusionMatrixDisplay(cm, display_labels=class_names).plot(
+    ax=axes[0], cmap='Blues', values_format='d')
+axes[0].set_title('Confusion Matrix')
+
+# 每个类别的预测概率分布展示
+sample_idx = 0
+axes[1].bar(class_names, test_probs[sample_idx].numpy())
+axes[1].set_ylabel('Probability')
+axes[1].set_title(f'Predicted Probs (True: {class_names[y_test[sample_idx]]})')
+axes[1].set_ylim(0, 1)
+plt.tight_layout()
+plt.show()
+
+# 分类报告
+print("\n分类报告:")
+print(classification_report(y_test, test_preds, target_names=class_names))
+```
+
+## 关键要点总结
+
+| 方面 | 要点 |
+|------|------|
+| 二分类输出 | 1 个 logit + Sigmoid |
+| 多分类输出 | K 个 logits + Softmax |
+| 损失函数 | `nn.CrossEntropyLoss(logits, class_indices)` |
+| 标签格式 | 类别索引 (LongTensor)，不是 one-hot |
+| 预测 | `logits.argmax(dim=1)` 获取最可能的类别 |
+| 数值稳定性 | Softmax 减去最大值；CrossEntropyLoss 内部融合 LogSoftmax |
+
+多分类逻辑回归（Softmax 回归）是最后一层使用 Softmax 的深度神经网络的直接前身。理解了它，就为学习深度神经网络分类打下了坚实基础。

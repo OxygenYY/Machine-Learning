@@ -1,0 +1,290 @@
+---
+title: "DBSCAN 与层次聚类"
+description: "掌握基于密度的 DBSCAN 聚类与层次聚类方法，处理非球形簇与发现任意形状的数据结构"
+part: "04-unsupervised-learning"
+order: 2
+difficulty: "intermediate"
+estimatedMinutes: 30
+objectives:
+  - "理解 DBSCAN 的核心概念：核心点、边界点、噪声点、epsilon 和 min_samples"
+  - "掌握 DBSCAN 相对于 K-Means 的优势与局限"
+  - "学习凝聚式层次聚类的原理与不同链接准则"
+  - "学会阅读和解释树状图（Dendrogram）"
+  - "对比三种聚类方法并掌握各自的适用场景"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra"]
+keywords: ["DBSCAN", "层次聚类", "树状图", "密度聚类", "链接准则", "噪声检测"]
+---
+
+# DBSCAN 与层次聚类
+
+K-Means 要求我们预先指定簇数 K，且假设簇为球形。当数据呈现非凸形状、密度不均或包含噪声点时，K-Means 的表现会显著下降。本课介绍两种解决问题的替代方法：基于密度的 DBSCAN 和层次聚类。
+
+## DBSCAN：基于密度的空间聚类
+
+DBSCAN（Density-Based Spatial Clustering of Applications with Noise）将聚类定义为由低密度区域分隔的高密度区域。它不需要预先指定簇的数量，能够发现任意形状的簇，并自然地识别噪声点。
+
+### 核心概念
+
+DBSCAN 依赖两个参数：
+
+- **$\epsilon$（eps）**：邻域半径。定义了一个点的"周边范围"。
+- **min_samples**：形成稠密区域所需的最小点数。
+
+基于这两个参数，DBSCAN 将数据点分为三类：
+
+- **核心点（Core Point）**：在半径 $\epsilon$ 内至少有 min_samples 个邻居（包括自身）的点。
+- **边界点（Border Point）**：不是核心点，但位于某个核心点的 $\epsilon$ 邻域内。
+- **噪声点（Noise Point）**：既不是核心点也不是边界点的点，被标记为异常。
+
+两个核心点如果彼此在对方的 $\epsilon$ 邻域内，则它们是**直接密度可达**的。通过传递性，所有密度可达的核心点属于同一个簇。
+
+### DBSCAN 算法流程
+
+1. 从未访问的点中随机选择一个点 $p$
+2. 检索从 $p$ 出发所有密度可达的点
+3. 如果 $p$ 是核心点，则形成一个新簇；否则将 $p$ 标记为噪声
+4. 重复直到所有点都被访问
+
+```python
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neighbors import NearestNeighbors
+
+def dbscan_pytorch(X, eps=0.5, min_samples=5):
+    """
+    用 PyTorch 实现 DBSCAN
+    Args:
+        X: 数据张量 (n, d)
+        eps: 邻域半径
+        min_samples: 最小邻居数
+    Returns:
+        labels: 簇标签，-1 表示噪声
+    """
+    n = X.shape[0]
+    labels = torch.full((n,), -2, dtype=torch.long)  # -2 = 未访问
+    cluster_id = 0
+
+    # 预计算所有成对距离
+    dist_matrix = torch.cdist(X, X)  # (n, n)
+
+    # 确定每个点的邻居集合与核心点身份
+    neighbor_counts = (dist_matrix <= eps).sum(dim=1)  # (n,)
+    is_core = neighbor_counts >= min_samples
+
+    for i in range(n):
+        if labels[i] != -2:
+            continue  # 已访问
+
+        neighbors = torch.where(dist_matrix[i] <= eps)[0]
+
+        if not is_core[i]:
+            labels[i] = -1  # 暂标记为噪声（后续可能被更新为边界点）
+            continue
+
+        # 核心点：扩展簇
+        labels[i] = cluster_id
+        seed_set = set(neighbors.tolist())
+        seed_set.discard(i)
+
+        while seed_set:
+            q = seed_set.pop()
+            if labels[q] == -1 or labels[q] == -2:
+                labels[q] = cluster_id
+                if is_core[q]:
+                    q_neighbors = torch.where(dist_matrix[q] <= eps)[0]
+                    for neighbor in q_neighbors.tolist():
+                        if labels[neighbor] == -2 or labels[neighbor] == -1:
+                            seed_set.add(neighbor)
+
+        cluster_id += 1
+
+    return labels  # -1 = 噪声
+
+# 生成非球形数据
+from sklearn.datasets import make_moons, make_circles
+
+X_moons, _ = make_moons(n_samples=300, noise=0.05, random_state=42)
+X_tensor = torch.tensor(X_moons, dtype=torch.float32)
+
+labels = dbscan_pytorch(X_tensor, eps=0.2, min_samples=5)
+```
+
+### DBSCAN 可视化
+
+```python
+def visualize_dbscan_result(X, labels):
+    """可视化 DBSCAN 结果，用黑色标记噪声点"""
+    unique_labels = set(labels.numpy())
+    colors = plt.cm.tab10(np.linspace(0, 1, len(unique_labels)))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for k, col in zip(unique_labels, colors):
+        if k == -1:
+            col = [0, 0, 0, 1]  # 噪声点用黑色
+            label_name = 'Noise'
+        else:
+            label_name = f'Cluster {k}'
+
+        mask = labels.numpy() == k
+        ax.scatter(X[mask, 0], X[mask, 1], c=[col], s=30,
+                   label=label_name, alpha=0.8)
+
+    ax.set_title(f'DBSCAN: 发现 {len(unique_labels) - (1 if -1 in unique_labels else 0)} 个簇')
+    ax.legend(fontsize=8)
+    plt.show()
+```
+
+### DBSCAN 参数选择
+
+选择 $\epsilon$ 的常用方法：绘制 k-距离图。对于每个点，计算它到第 $k$ 近邻的距离（$k$ = min_samples - 1），然后将这些距离排序并绘制：
+
+```python
+def k_distance_plot(X, k=4):
+    """k-距离图辅助选择 eps"""
+    nbrs = NearestNeighbors(n_neighbors=k + 1).fit(X.numpy())
+    distances, _ = nbrs.kneighbors(X.numpy())
+    k_distances = np.sort(distances[:, k])
+
+    plt.plot(k_distances)
+    plt.xlabel('数据点（按距离排序）')
+    plt.ylabel(f'到第 {k} 近邻的距离')
+    plt.title('k-距离图（寻找"拐点"作为 eps）')
+    plt.grid(True, alpha=0.3)
+    plt.show()
+```
+
+拐点处对应的距离就是 $\epsilon$ 的合适候选值。
+
+### DBSCAN 的优势与局限
+
+**优势**：
+- 不需要预先指定簇的数量
+- 能够发现任意形状的簇
+- 天然支持噪声点/异常点检测
+- 对数据点的顺序不敏感（结果确定）
+
+**局限**：
+- 参数 $\epsilon$ 和 min_samples 需要人工调整
+- 密度差异大的数据集中，单一 $(\epsilon, \min\_samples)$ 组合无法同时捕捉所有簇
+- 高维数据中距离变得不具区分度（维度灾难），DBSCAN 效果下降
+
+## 层次聚类
+
+层次聚类构建一个树状的簇层次结构，而非一次性划分所有簇。它分为两种策略：
+
+- **凝聚式（Agglomerative，自底向上）**：每个点初始为一个簇，每次合并最近的两个簇，直到剩下一个簇
+- **分裂式（Divisive，自顶向下）**：所有点初始为一个簇，每次分裂一个簇，直到每个点各成一簇
+
+凝聚式更常用，也是本课的重点。
+
+### 链接准则
+
+合并簇时需要定义簇间距离，不同的链接准则产生不同的结果：
+
+- **Single Linkage（单链接）**：两个簇中最近的两点之间的距离
+  $$d(S_1, S_2) = \min_{x \in S_1, y \in S_2} \|x - y\|$$
+  对细长簇友好，但对噪声和离群点敏感，容易产生"链式效应"
+
+- **Complete Linkage（全链接）**：两个簇中最远的两点之间的距离
+  $$d(S_1, S_2) = \max_{x \in S_1, y \in S_2} \|x - y\|$$
+  倾向产生紧凑的簇，适合球形数据
+
+- **Average Linkage（平均链接）**：两个簇中所有点对之间的平均距离
+  $$d(S_1, S_2) = \frac{1}{|S_1||S_2|} \sum_{x \in S_1} \sum_{y \in S_2} \|x - y\|$$
+  在单链接与全链接之间取得平衡
+
+- **Ward's Method**：最小化合并后簇内方差的增加量
+  $$\Delta = \frac{|S_1||S_2|}{|S_1| + |S_2|} \|\mu_{S_1} - \mu_{S_2}\|^2$$
+  倾向产生大小均衡的簇，实践中表现优异
+
+### 层次聚类实现与树状图
+
+```python
+from scipy.cluster.hierarchy import dendrogram, linkage
+from sklearn.cluster import AgglomerativeClustering
+
+# 生成测试数据
+from sklearn.datasets import make_blobs
+X_blobs, _ = make_blobs(n_samples=200, centers=4, random_state=42)
+
+# 计算链接矩阵
+Z = linkage(X_blobs, method='ward')
+
+# 绘制树状图
+def plot_dendrogram(Z, labels=None, title='层次聚类树状图（Ward 链接）'):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    dendrogram(Z, labels=labels, leaf_rotation=90, leaf_font_size=8, ax=ax)
+    ax.set_title(title)
+    ax.set_xlabel('样本索引')
+    ax.set_ylabel('距离 / 合并代价')
+    # 用不同颜色标注截断后的簇
+    from scipy.cluster.hierarchy import fcluster
+    clusters = fcluster(Z, t=4, criterion='maxclust')
+    # 标注簇边界
+    ax.axhline(y=np.median(Z[:, 2]), color='r', linestyle='--',
+               label='建议截断位置')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+plot_dendrogram(Z)
+
+# 用 scikit-learn 进行聚类
+agg = AgglomerativeClustering(n_clusters=4, linkage='ward')
+labels_hc = agg.fit_predict(X_blobs)
+```
+
+### 解读树状图
+
+树状图的横轴是数据点，纵轴是合并时的距离（或合并代价）。越早合并（距离越小）的簇越相似。在适当的距离处"切割"树状图，就能得到对应的簇划分。切割线越低，簇越多；切割线越高，簇越少。
+
+选择簇数时，看树状图中最长的垂直线段（合并代价跳跃最大的地方），在其下方切割。
+
+### 三种方法对比
+
+```python
+import torch
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
+
+def compare_clustering_methods(X, K=4):
+    """对比三种聚类方法"""
+    methods = {
+        'K-Means': KMeans(n_clusters=K, random_state=42).fit_predict(X),
+        'DBSCAN': DBSCAN(eps=0.4, min_samples=5).fit_predict(X),
+        '层次聚类 (Ward)': AgglomerativeClustering(
+            n_clusters=K, linkage='ward'
+        ).fit_predict(X),
+    }
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+    for ax, (name, labels) in zip(axes, methods.items()):
+        scatter = ax.scatter(X[:, 0], X[:, 1], c=labels,
+                             cmap='tab10', s=30, alpha=0.8,
+                             edgecolors='k', linewidth=0.3)
+        # 标记噪声（DBSCAN）
+        noise_mask = labels == -1
+        if noise_mask.any():
+            ax.scatter(X[noise_mask, 0], X[noise_mask, 1],
+                       c='black', s=40, marker='x', label=f'噪声 ({noise_mask.sum()})')
+        ax.set_title(name)
+        ax.legend(fontsize=8)
+    plt.suptitle('三种聚类方法对比', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+```
+
+### 何时使用哪种方法
+
+| 场景 | 推荐方法 |
+|------|----------|
+| 已知簇数，数据为球形 | K-Means |
+| 簇为任意形状，数据含噪声 | DBSCAN |
+| 想要探索数据的层次结构 | 层次聚类 |
+| 大规模数据 | K-Means（最快） |
+| 密度差异大 | 使用 OPTICS 或 HDBSCAN |
+| 高维数据 | 先降维（PCA），再聚类 |
+
+### 小结
+
+DBSCAN 和层次聚类弥补了 K-Means 的重要局限性。DBSCAN 无需指定簇数、能发现任意形状、自动检测噪声点，适合探索性数据分析。层次聚类提供了数据内在结构的完整视图，树状图是一目了然的可视化工具。在实际项目中，建议对同一份数据尝试多种聚类方法，比较结果的稳定性和可解释性。下一课我们将学习 PCA，为高维数据的聚类和可视化做好准备。

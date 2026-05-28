@@ -1,0 +1,374 @@
+---
+title: "深度神经网络：架构设计"
+description: "从感知机到深度网络：激活函数、XOR问题、通用近似定理与 PyTorch MLP 构建"
+part: "03-supervised-learning"
+order: 6
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "理解从感知机到多层神经网络的发展逻辑"
+  - "掌握常用激活函数及其适用场景"
+  - "通过 XOR 问题理解非线性变换的必要性"
+  - "了解通用近似定理的直观含义"
+  - "学会使用 PyTorch 搭建深度多层感知机（MLP）并统计参数"
+prerequisites: ["logistic-regression-theory", "linear-algebra", "multiclass-classification"]
+keywords: ["dnn", "mlp", "activation-functions", "universal-approximation", "architecture"]
+---
+
+# 一、从感知机到多层网络
+
+## 单层感知机
+
+最简单的神经网络——感知机（Perceptron）——本质上就是线性分类器：
+
+$$\hat{y} = f(\mathbf{w}^T\mathbf{x} + b)$$
+
+其中 $f$ 是阶跃函数（或 Sigmoid）。单层感知机只能解决**线性可分**的问题。
+
+## 堆叠神经元
+
+深度神经网络（DNN）的核心思想简单而强大：**堆叠多个线性变换，并在之间插入非线性激活函数**。
+
+$$\begin{aligned}
+\mathbf{h}^{(1)} &= \sigma_1(\mathbf{W}^{(1)}\mathbf{x} + \mathbf{b}^{(1)}) \\
+\mathbf{h}^{(2)} &= \sigma_2(\mathbf{W}^{(2)}\mathbf{h}^{(1)} + \mathbf{b}^{(2)}) \\
+&\;\;\vdots \\
+\hat{\mathbf{y}} &= \mathbf{W}^{(L)}\mathbf{h}^{(L-1)} + \mathbf{b}^{(L)}
+\end{aligned}$$
+
+每一层 $\mathbf{h}^{(\ell)}$ 是**表示**（representation）——对输入数据的逐步抽象。浅层学习低级特征（边缘、纹理），深层学习高级特征（形状、语义）。
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 一个最简单的 MLP
+class SimpleMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)   # 第 1 层
+        self.relu = nn.ReLU()                           # 激活函数
+        self.fc2 = nn.Linear(hidden_dim, output_dim)   # 第 2 层（输出）
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)   # 关键：没有激活函数这就是个线性模型！
+        x = self.fc2(x)
+        return x
+
+model = SimpleMLP(input_dim=10, hidden_dim=32, output_dim=3)
+print(model)
+```
+
+# 二、激活函数详解
+
+激活函数为网络引入**非线性**，是深度学习区别于线性模型的关键。
+
+## Sigmoid: $\sigma(x) = \frac{1}{1+e^{-x}}$
+
+- 输出范围: (0, 1)
+- 适用场景: 二分类输出层
+- 缺点: **梯度饱和**（$|x|$ 大时梯度接近 0）、输出不以 0 为中心、计算指数代价高
+
+## Tanh: $\tanh(x) = \frac{e^x - e^{-x}}{e^x + e^{-x}}$
+
+- 输出范围: (-1, 1)，以 0 为中心（优于 Sigmoid）
+- 缺点: 同样存在梯度饱和问题
+
+## ReLU: $\text{ReLU}(x) = \max(0, x)$
+
+- 输出范围: $[0, \infty)$
+- **优点**：计算简单（只需要阈值比较）、无正半轴饱和、实践中收敛快
+- **缺点**："Dead ReLU" 问题——负半轴梯度恒为 0，某些神经元可能永远不会被激活
+
+## LeakyReLU: $\text{LeakyReLU}(x) = \max(\alpha x, x)$
+
+- 在负半轴有一个小的斜率 $\alpha$（如 0.01），解决了 Dead ReLU 的问题。
+
+## GELU (Gaussian Error Linear Unit)
+
+$$\text{GELU}(x) = x \cdot \Phi(x) \approx 0.5x \left(1 + \tanh\left(\sqrt{\frac{2}{\pi}}(x + 0.044715 x^3)\right)\right)$$
+
+- Transformer 模型（BERT、GPT）的标准激活函数
+- 比 ReLU 更平滑，在负值区有非零输出
+
+## Swish / SiLU: $\text{SiLU}(x) = x \cdot \sigma(x)$
+
+- 自门控（self-gating）机制：Sigmoid 控制信息流
+- 在深层网络上表现优于 ReLU
+
+```python
+# 可视化所有激活函数
+x = torch.linspace(-4, 4, 300)
+
+activations = {
+    'Sigmoid': torch.sigmoid(x),
+    'Tanh': torch.tanh(x),
+    'ReLU': F.relu(x),
+    'LeakyReLU(0.1)': F.leaky_relu(x, negative_slope=0.1),
+    'GELU': F.gelu(x),
+    'SiLU': F.silu(x),
+    'ELU': F.elu(x),
+}
+
+fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+axes = axes.flatten()
+
+for i, (name, y) in enumerate(activations.items()):
+    axes[i].plot(x.numpy(), y.numpy(), linewidth=2)
+    axes[i].axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+    axes[i].axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+    axes[i].set_title(name)
+    axes[i].set_ylim(-1.5, 4.5)
+    axes[i].grid(True, alpha=0.3)
+
+# 导数对比
+axes[-1].plot(x.numpy(), (torch.sigmoid(x) * (1 - torch.sigmoid(x))).numpy(),
+              label='Sigmoid\'', linewidth=2)
+axes[-1].plot(x.numpy(), (1 - torch.tanh(x)**2).numpy(),
+              label='Tanh\'', linewidth=2)
+relu_grad = (x > 0).float()
+axes[-1].plot(x.numpy(), relu_grad.numpy(), label='ReLU\'', linewidth=2)
+axes[-1].set_title('Gradient Comparison')
+axes[-1].legend(fontsize=8)
+axes[-1].grid(True, alpha=0.3)
+axes[-1].set_ylim(-0.2, 1.2)
+
+plt.tight_layout()
+plt.show()
+```
+
+## 激活函数选择指南
+
+| 任务/架构 | 推荐激活函数 |
+|-----------|-------------|
+| 隐藏层（CNN/MLP） | ReLU / LeakyReLU（优先尝试） |
+| 隐藏层（Transformer） | GELU |
+| 二分类输出层 | Sigmoid |
+| 多分类输出层 | Softmax（即不使用单个激活，而是 Softmax 层） |
+| 回归输出层 | 无（线性输出） |
+
+# 三、XOR 问题：为什么需要非线性
+
+XOR（异或）是经典的线性不可分问题：
+
+| $x_1$ | $x_2$ | $x_1 \oplus x_2$ |
+|-------|-------|-----------------|
+| 0 | 0 | 0 |
+| 0 | 1 | 1 |
+| 1 | 0 | 1 |
+| 1 | 1 | 0 |
+
+单层感知机无法找到一个线性决策边界将两类分开。但添加一个隐藏层（含非线性激活函数）就能解决：
+
+```python
+# XOR 问题演示
+torch.manual_seed(42)
+
+X_xor = torch.tensor([[0., 0.], [0., 1.], [1., 0.], [1., 1.]])
+y_xor = torch.tensor([[0.], [1.], [1.], [0.]])
+
+# 模型 1: 无隐藏层（线性，无法解决 XOR）
+linear_model = nn.Linear(2, 1)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.Adam(linear_model.parameters(), lr=0.1)
+
+print("=== 线性模型（无隐藏层）===")
+for epoch in range(500):
+    optimizer.zero_grad()
+    loss = criterion(linear_model(X_xor), y_xor)
+    loss.backward()
+    optimizer.step()
+    if epoch % 250 == 0:
+        with torch.no_grad():
+            preds = (torch.sigmoid(linear_model(X_xor)) > 0.5).float()
+            acc = (preds == y_xor).float().mean()
+        print(f"  Epoch {epoch}: Loss={loss.item():.4f}, Acc={acc:.2f}")
+
+# 模型 2: 带隐藏层（非线性，可以解决 XOR）
+mlp_model = nn.Sequential(
+    nn.Linear(2, 4),
+    nn.ReLU(),
+    nn.Linear(4, 1),
+)
+optimizer = optim.Adam(mlp_model.parameters(), lr=0.1)
+
+print("\n=== MLP with Hidden Layer ===")
+for epoch in range(500):
+    optimizer.zero_grad()
+    loss = criterion(mlp_model(X_xor), y_xor)
+    loss.backward()
+    optimizer.step()
+    if epoch % 250 == 0:
+        with torch.no_grad():
+            preds = (torch.sigmoid(mlp_model(X_xor)) > 0.5).float()
+            acc = (preds == y_xor).float().mean()
+        print(f"  Epoch {epoch}: Loss={loss.item():.4f}, Acc={acc:.2f}")
+
+# 对比最终结果
+print("\n最终对比:")
+with torch.no_grad():
+    lin_preds = (torch.sigmoid(linear_model(X_xor)) > 0.5).float()
+    mlp_preds = (torch.sigmoid(mlp_model(X_xor)) > 0.5).float()
+    for i in range(4):
+        print(f"  Input {X_xor[i].tolist()}: Linear={lin_preds[i].item():.0f}, "
+              f"MLP={mlp_preds[i].item():.0f}, True={y_xor[i].item():.0f}")
+```
+
+**关键启示**：
+- 没有非线性激活函数，无论堆叠多少层，整个网络等价于一个线性变换（因为线性函数的复合仍然是线性的）。
+- 只需一个隐藏层（带非线性激活），理论上就可以近似任何连续函数。
+
+# 四、通用近似定理
+
+> 一个具有单个隐藏层（包含足够多神经元）和非线性激活函数的前馈神经网络，可以以任意精度近似任何闭区间上的连续函数。
+
+这一定理（Universal Approximation Theorem）是深度学习的理论基础。但需要注意：
+- 定理只说**存在**这样的网络，没说如何找到（训练）。
+- 理论上单个隐藏层就够了，但实践中**深层**网络往往更高效（需要更少的神经元总数）。
+- 深度允许层次化的特征学习：从简单到复杂，逐层抽象。
+
+# 五、架构设计：宽度 vs 深度
+
+```python
+def count_parameters(model):
+    """统计模型参数数量"""
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"{'='*50}")
+    print(f"{'Layer':<25} {'Output Shape':<20} {'Params':<10}")
+    print(f"{'='*50}")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"{name:<25} {str(list(param.shape)):<20} {param.numel():<10}")
+    print(f"{'='*50}")
+    print(f"Total params: {total:,}  |  Trainable: {trainable:,}")
+    return total
+
+# 对比：宽 vs 深
+class WideNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(784, 1024), nn.ReLU(),
+            nn.Linear(1024, 10)
+        )
+    def forward(self, x): return self.net(x)
+
+class DeepNetwork(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(784, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 256), nn.ReLU(),
+            nn.Linear(256, 10)
+        )
+    def forward(self, x): return self.net(x)
+
+print("宽网络（2层）:")
+wide_params = count_parameters(WideNetwork())
+
+print("\n深网络（4层）:")
+deep_params = count_parameters(DeepNetwork())
+
+print(f"\n参数对比: 宽网络 {wide_params:,} vs 深网络 {deep_params:,}")
+```
+
+## 设计经验法则
+
+| 因素 | 建议 |
+|------|------|
+| 输入层维度 | 等于特征数量 |
+| 输出层维度 | 回归: 1; 二分类: 1; 多分类: K |
+| 隐藏层宽度 | 通常以 2 的幂次（32, 64, 128, 256, 512, 1024） |
+| 隐藏层数量 | 简单任务 1-3 层；中等 4-10 层；复杂任务更多 |
+| 瓶颈结构 | 先宽后窄（编码器模式）有助于学习紧凑表示 |
+
+# 六、使用 nn.Sequential 构建 DNN
+
+PyTorch 提供了多种构建 DNN 的方式：
+
+```python
+# 方式 1: nn.Sequential（简单线性堆叠）
+model_seq = nn.Sequential(
+    nn.Linear(28*28, 512),
+    nn.ReLU(),
+    nn.Dropout(0.2),
+    nn.Linear(512, 256),
+    nn.ReLU(),
+    nn.Dropout(0.2),
+    nn.Linear(256, 10),
+)
+
+# 方式 2: 自定义 nn.Module（灵活控制）
+class FlexibleMLP(nn.Module):
+    def __init__(self, input_dim, hidden_dims, output_dim, dropout=0.0):
+        """
+        hidden_dims: 隐藏层维度列表，如 [512, 256, 128]
+        """
+        super().__init__()
+        layers = []
+        prev_dim = input_dim
+
+        for i, hdim in enumerate(hidden_dims):
+            layers.append(nn.Linear(prev_dim, hdim))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            prev_dim = hdim
+
+        layers.append(nn.Linear(prev_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        # 如果有需要，可以在此处添加中间输出的逻辑
+        return self.net(x)
+
+# 构建一个 3 隐层 MLP
+model = FlexibleMLP(input_dim=784, hidden_dims=[512, 256, 128],
+                     output_dim=10, dropout=0.2)
+print(model)
+count_parameters(model)
+```
+
+# 七、参数计算示例
+
+对于 `nn.Linear(in_features, out_features)`：
+- 权重矩阵形状: `(out_features, in_features)`，参数数 = `out_features * in_features`
+- 偏置向量形状: `(out_features,)`，参数数 = `out_features`
+- 总参数 = `out_features * in_features + out_features`（如果有偏置）
+
+```python
+# 手动验证参数数量
+fc = nn.Linear(784, 256)
+print(f"Linear(784, 256):")
+print(f"  权重: {list(fc.weight.shape)} -> {fc.weight.numel()} 参数")
+print(f"  偏置: {list(fc.bias.shape)} -> {fc.bias.numel()} 参数")
+print(f"  总计: {sum(p.numel() for p in fc.parameters())} 参数")
+print(f"  公式: 784*256 + 256 = {784*256 + 256}")
+```
+
+**关键洞察**：网络的大部分参数集中在第一层（输入维度通常最大）和最后几层（通道数/宽度大）。中间层虽然多，但若采用瓶颈结构，参数反而较少。
+
+```python
+# 示例：分析一个典型 MLP 的参数分布
+analyze_model = nn.Sequential(
+    nn.Linear(784, 512), nn.ReLU(),
+    nn.Linear(512, 256), nn.ReLU(),
+    nn.Linear(256, 128), nn.ReLU(),
+    nn.Linear(128, 10),
+)
+
+total = 0
+for name, child in analyze_model.named_children():
+    if isinstance(child, nn.Linear):
+        n = sum(p.numel() for p in child.parameters())
+        pct = n / sum(p.numel() for p in analyze_model.parameters()) * 100
+        print(f"{name}: {child.in_features}->{child.out_features}: {n:,} params ({pct:.1f}%)")
+        total += n
+print(f"总参数: {total:,}")
+```

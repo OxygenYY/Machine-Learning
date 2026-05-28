@@ -1,0 +1,411 @@
+---
+title: "模型调试与故障排查"
+description: "系统化诊断模型训练中的常见问题：Loss 不下降、梯度消失/爆炸、过拟合、NaN 等，并提供实用的调试策略与工具"
+part: "06-practical-skills"
+order: 4
+difficulty: "intermediate"
+estimatedMinutes: 35
+objectives:
+  - "识别模型训练中常见的失败模式及其原因"
+  - "掌握梯度检查、梯度范数监控等调试技术"
+  - "学会使用 sanity check（过拟合小批量）验证训练流程正确性"
+  - "理解并修复梯度消失/爆炸和 Dead ReLU 问题"
+  - "掌握处理 NaN/Inf loss 的系统化方法"
+  - "使用 PyTorch 内置工具进行异常检测"
+prerequisites: ["python-basics", "training-dnn", "hyperparameter-tuning"]
+keywords: ["debugging", "gradient-vanishing", "overfitting", "nan-loss", "torch-autograd"]
+---
+
+# 一、调试心态：系统化而非凭感觉
+
+模型训练出问题时，新手倾向于随机尝试（换个学习率、加一层、换个激活函数）。这种"凭感觉"的方式效率极低。本节提供一套**系统化的调试流程**，让每一次调试都有明确的方向。
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import matplotlib.pyplot as plt
+```
+
+# 二、故障一：Loss 不下降
+
+Loss 在训练过程中几乎不动，或者一开始下降之后停滞。可能的原因按概率排序：
+
+## 2.1 学习率问题（最常见）
+
+```python
+# 演示：不同学习率对 loss 的影响
+X_demo = torch.randn(500, 10)
+y_demo = torch.randn(500, 1)
+
+def train_with_lr(lr, label):
+    model = nn.Linear(10, 1)
+    optimizer = optim.SGD(model.parameters(), lr=lr)
+    criterion = nn.MSELoss()
+    losses = []
+    for epoch in range(100):
+        optimizer.zero_grad()
+        loss = criterion(model(X_demo), y_demo)
+        loss.backward()
+        optimizer.step()
+        losses.append(loss.item())
+    plt.plot(losses, label=f'lr={lr}')
+    return losses
+
+plt.figure(figsize=(10, 5))
+train_with_lr(1e-6, '太小')   # loss 几乎不动
+train_with_lr(0.01, '合适')    # 正常下降
+train_with_lr(10.0, '太大')    # loss 爆炸为 NaN
+plt.xlabel('Epoch', fontsize=12)
+plt.ylabel('Loss', fontsize=12)
+plt.title('学习率对 Loss 的影响', fontsize=14)
+plt.legend()
+plt.yscale('log')
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+**判断方法**：
+- Loss 几乎不变 → 学习率太小
+- Loss 震荡剧烈 → 学习率太大
+- Loss 直接 NaN → 学习率过大或数据有问题
+
+## 2.2 梯度检查（Gradient Checking）
+
+确保你手动实现的梯度（或自定义层）与 PyTorch 的 autograd 一致：
+
+```python
+def gradient_check(model, loss_fn, inputs, targets, epsilon=1e-6):
+    """数值梯度 vs 自动微分梯度的比较"""
+    model.zero_grad()
+    outputs = model(inputs)
+    loss = loss_fn(outputs, targets)
+    loss.backward()
+
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if param.grad is None:
+                continue
+            analytical_grad = param.grad.clone()
+
+            # 数值梯度（中心差分）
+            numerical_grad = torch.zeros_like(param)
+            param_flat = param.view(-1)
+            for i in range(min(len(param_flat), 5)):  # 只检查前5个元素（高效）
+                old_val = param_flat[i].item()
+
+                param_flat[i] = old_val + epsilon
+                loss_plus = loss_fn(model(inputs), targets).item()
+
+                param_flat[i] = old_val - epsilon
+                loss_minus = loss_fn(model(inputs), targets).item()
+
+                numerical_grad.view(-1)[i] = (loss_plus - loss_minus) / (2 * epsilon)
+                param_flat[i] = old_val  # 恢复
+
+            # 相对误差
+            diff = torch.abs(analytical_grad - numerical_grad)
+            denom = torch.abs(analytical_grad) + torch.abs(numerical_grad) + 1e-8
+            rel_error = (diff / denom).mean().item()
+
+            print(f"{name}: 最大相对误差 = {rel_error:.2e}", end="")
+            if rel_error < 1e-4:
+                print(" ✓")
+            elif rel_error < 1e-2:
+                print(" (勉强通过)")
+            else:
+                print(" ✗ 梯度可能有 Bug!")
+
+# 示例
+model = nn.Sequential(nn.Linear(10, 5), nn.ReLU(), nn.Linear(5, 1))
+gradient_check(model, nn.MSELoss(), X_demo[:5], y_demo[:5])
+```
+
+## 2.3 监控梯度范数
+
+记录每一层的梯度范数，可以快速发现哪一层出了问题：
+
+```python
+def log_gradient_norms(model):
+    """打印每一层参数的梯度范数统计"""
+    total_norm = 0
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            param_norm = param.grad.data.norm(2)
+            total_norm += param_norm.item() ** 2
+            print(f"  {name:20s}: grad_norm = {param_norm.item():.6f}")
+    total_norm = total_norm ** 0.5
+    print(f"  总梯度范数: {total_norm:.6f}")
+    return total_norm
+
+
+# 在训练循环中使用
+model_debug = nn.Sequential(
+    nn.Linear(20, 128), nn.ReLU(),
+    nn.Linear(128, 128), nn.ReLU(),
+    nn.Linear(128, 128), nn.ReLU(),
+    nn.Linear(128, 1)
+)
+optimizer = optim.Adam(model_debug.parameters(), lr=0.01)
+criterion = nn.MSELoss()
+
+X_debug = torch.randn(64, 20)
+y_debug = torch.randn(64, 1)
+
+optimizer.zero_grad()
+loss = criterion(model_debug(X_debug), y_debug)
+loss.backward()
+print("各层梯度范数:")
+log_gradient_norms(model_debug)
+```
+
+**判断标准**：
+- 梯度范数 $< 10^{-5}$ → 梯度消失，学习率太小或网络太深
+- 梯度范数 $> 10^3$ → 梯度爆炸，需要梯度裁剪
+- 各层梯度范数差异过大 → 可能存在"梯度瓶颈"
+
+# 三、故障二：过拟合
+
+训练 loss 持续下降但验证 loss 不降反升，是过拟合的经典信号。
+
+```python
+import torch.nn.functional as F
+
+# 构造小样本数据来诱发过拟合
+X_overfit = torch.randn(200, 50)
+y_overfit = (torch.randn(200) > 0).long()
+
+# 过大模型 + 小数据 = 过拟合
+model_big = nn.Sequential(
+    nn.Linear(50, 256), nn.ReLU(),
+    nn.Linear(256, 256), nn.ReLU(),
+    nn.Linear(256, 256), nn.ReLU(),
+    nn.Linear(256, 2)
+)
+
+train_dataset = TensorDataset(X_overfit[:160], y_overfit[:160])
+val_dataset = TensorDataset(X_overfit[160:], y_overfit[160:])
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=40)
+
+optimizer = optim.Adam(model_big.parameters(), lr=0.001)
+train_losses, val_losses = [], []
+criterion = nn.CrossEntropyLoss()
+
+for epoch in range(200):
+    model_big.train()
+    epoch_train_loss = 0
+    for batch_X, batch_y in train_loader:
+        optimizer.zero_grad()
+        loss = criterion(model_big(batch_X), batch_y)
+        loss.backward()
+        optimizer.step()
+        epoch_train_loss += loss.item()
+    train_losses.append(epoch_train_loss / len(train_loader))
+
+    model_big.eval()
+    with torch.no_grad():
+        val_loss = criterion(model_big(val_dataset.tensors[0]),
+                             val_dataset.tensors[1])
+        val_losses.append(val_loss.item())
+
+plt.figure(figsize=(10, 5))
+plt.plot(train_losses, label='训练 Loss', color='blue')
+plt.plot(val_losses, label='验证 Loss', color='red')
+plt.axvline(x=50, color='gray', linestyle='--', alpha=0.5,
+            label='开始过拟合 (约 Epoch 50)')
+plt.xlabel('Epoch', fontsize=12)
+plt.ylabel('Loss', fontsize=12)
+plt.title('过拟合的典型曲线', fontsize=14)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+**解决方案**（按优先级排列）：
+1. 增加数据（数据增强、收集更多数据）
+2. 正则化（L1/L2、Dropout、Batch Normalization）
+3. 减小模型容量（减少层数或隐藏单元）
+4. 早停（Early Stopping）
+
+# 四、Sanity Check：你必须做的检查
+
+在启动长时间训练之前，这几个快速检查可以节省大量时间：
+
+## 4.1 过拟合单个 Batch
+
+模型应该能完全拟合一个很小的数据集（如单个 batch）。如果连这一点都做不到，训练流程中一定有问题。
+
+```python
+def overfit_single_batch_test():
+    """Sanity Check #1: 模型能否过拟合单个小批量？"""
+    # 取很小的 batch
+    X_small = torch.randn(16, 5)
+    y_small = torch.randn(16, 1)
+
+    model = nn.Sequential(
+        nn.Linear(5, 32), nn.ReLU(),
+        nn.Linear(32, 32), nn.ReLU(),
+        nn.Linear(32, 1)
+    )
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    criterion = nn.MSELoss()
+
+    initial_loss = criterion(model(X_small), y_small).item()
+    for epoch in range(500):
+        optimizer.zero_grad()
+        loss = criterion(model(X_small), y_small)
+        loss.backward()
+        optimizer.step()
+
+    final_loss = criterion(model(X_small), y_small).item()
+    print(f"初始 Loss: {initial_loss:.4f}")
+    print(f"最终 Loss: {final_loss:.6f}")
+    passed = final_loss < 0.001
+    print(f"Sanity Check {'通过' if passed else '失败'}: ", end="")
+    print("模型能完全拟合小批量数据 ✓" if passed else "模型无法过拟合，训练流程有 Bug ✗")
+    return passed
+
+overfit_single_batch_test()
+```
+
+## 4.2 检查数据
+
+```python
+def data_sanity_check(dataloader):
+    """Sanity Check #2: 数据是否有明显问题"""
+    for batch_X, batch_y in dataloader:
+        print(f"输入形状: {batch_X.shape}")
+        print(f"标签形状: {batch_y.shape}")
+        print(f"输入范围: [{batch_X.min().item():.4f}, {batch_X.max().item():.4f}]")
+        print(f"输入均值: {batch_X.mean().item():.4f}, 标准差: {batch_X.std().item():.4f}")
+        print(f"是否包含 NaN: {torch.isnan(batch_X).any().item()}")
+        print(f"是否包含 Inf: {torch.isinf(batch_X).any().item()}")
+
+        # 检查标签
+        if batch_y.dtype in [torch.long, torch.int64, torch.int32]:
+            unique_labels = torch.unique(batch_y)
+            print(f"唯一标签值: {unique_labels.tolist()}")
+        break  # 只检查第一个 batch
+
+loader_check = DataLoader(train_dataset, batch_size=32, shuffle=True)
+data_sanity_check(loader_check)
+```
+
+# 五、故障三：NaN / Inf Loss
+
+Loss 中出现 NaN 或 Inf 是最让人头疼的问题之一。系统化排查顺序：
+
+```python
+def diagnose_nan(model, loss, optimizer):
+    """诊断 NaN 的来源"""
+    checks = []
+    # 1. 检查输入数据
+    checks.append(("输入含 NaN/Inf", "检查数据预处理和归一化"))
+    # 2. 检查 loss
+    checks.append(("Loss 为 NaN", "检查标签值、损失函数输入范围"))
+    # 3. 检查梯度
+    has_nan_grad = any(
+        param.grad is not None and torch.isnan(param.grad).any()
+        for param in model.parameters()
+    )
+    checks.append(("梯度含 NaN", "启用梯度裁剪、降低学习率"))
+    # 4. 检查参数
+    has_nan_param = any(
+        torch.isnan(param).any() for param in model.parameters()
+    )
+    checks.append(("参数含 NaN", "重新初始化模型、降低学习率"))
+    # 5. 检查激活值
+    checks.append(("激活值含 NaN", "检查激活函数输入范围，添加 BatchNorm"))
+    return checks
+
+# 解决方案：梯度裁剪
+torch.nn.utils.clip_grad_norm_(model_debug.parameters(), max_norm=1.0)
+
+# 使用 PyTorch 的异常检测工具
+torch.autograd.set_detect_anomaly(True)  # 启用后会自动追踪 NaN 来源
+# 警告：这个功能会显著减慢训练，仅在调试时使用
+```
+
+# 六、Dead ReLU 问题
+
+Dead ReLU 是指一些神经元在训练过程中权重更新到某种状态后，对所有输入都输出 0，从此再也不会被激活。
+
+```python
+# 演示 Dead ReLU
+def dead_relu_demo():
+    model = nn.Sequential(
+        nn.Linear(2, 5),
+        nn.ReLU(),
+        nn.Linear(5, 1)
+    )
+
+    # 用很大的学习率训练可能会导致某些 ReLU 死亡
+    optimizer = optim.SGD(model.parameters(), lr=10.0)
+    criterion = nn.MSELoss()
+
+    X_demo_dead = torch.randn(100, 2)
+    y_demo_dead = torch.randn(100, 1)
+
+    activation_count = []
+
+    def hook_fn(module, input, output):
+        dead_ratio = (output <= 0).all(dim=0).float().mean().item()
+        activation_count.append(dead_ratio)
+
+    hook = model[1].register_forward_hook(hook_fn)
+
+    for epoch in range(50):
+        optimizer.zero_grad()
+        output = model(X_demo_dead)
+        loss = criterion(output, y_demo_dead)
+        loss.backward()
+        optimizer.step()
+
+    hook.remove()
+    print(f"训练结束时, 平均 Dead ReLU 比例: {np.mean(activation_count[-10:]):.2%}")
+
+dead_relu_demo()
+```
+
+**预防 Dead ReLU**：
+1. 使用 Leaky ReLU 或 ELU 替代普通 ReLU
+2. 使用较小的学习率
+3. 使用 Batch Normalization
+
+# 七、调试工作流总结
+
+当你发现模型表现不佳时，按照以下顺序排查：
+
+```
+1. SANITY CHECK
+   ├── 过拟合单个 batch（验证训练循环正确性）
+   ├── 检查数据（形状、范围、NaN、标签分布）
+   └── 与已知 baseline 比较
+
+2. 检查 LOSS 曲线
+   ├── Loss 不下降 → 学习率问题（使用 LR Finder）
+   ├── Loss 震荡 → 学习率太大或 batch size 太小
+   └── Loss NaN/Inf → 梯度裁剪、数据清洗、降低学习率
+
+3. 检查梯度
+   ├── 梯度消失 → 残差连接、更好的初始化、调大学习率
+   ├── 梯度爆炸 → 梯度裁剪、降低学习率、更好的初始化
+   └── 梯度不匹配 → 检查自定义层/损失函数（梯度检查）
+
+4. 检查泛化
+   ├── 过拟合 → 正则化、数据增强、简化模型
+   └── 欠拟合 → 增加模型容量、训练更久、降低正则化
+```
+
+# 八、关键要点
+
+1. **永远先做 Sanity Check**：过拟合小批量是验证训练流程的最快方法。
+2. **学习率是第一嫌疑人**：绝大多数 Loss 问题都与学习率有关。
+3. **监控梯度范数**：梯度消失和爆炸可以通过各层梯度范数快速诊断。
+4. **梯度检查**是验证自定义代码正确性的金标准。
+5. `torch.autograd.set_detect_anomaly(True)` 可以定位 NaN 的精确来源（但会拖慢训练）。
+6. Dead ReLU 在深层网络中常见，可以用 Leaky ReLU 或 PReLU 缓解。
+7. 过拟合是好事（至少证明模型有学习能力），之后再用正则化控制。

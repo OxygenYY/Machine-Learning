@@ -1,0 +1,379 @@
+---
+title: "张量基础（上）"
+description: "深入理解张量的概念、属性和创建方法，掌握张量的数据类型、设备管理以及基本算术运算"
+part: "02-pytorch-basics"
+order: 2
+difficulty: "beginner"
+estimatedMinutes: 35
+objectives:
+  - "理解张量是标量、向量、矩阵的泛化"
+  - "掌握张量的核心属性：shape, dtype, device, requires_grad"
+  - "熟练使用多种方式创建张量"
+  - "理解张量的数据类型和设备概念"
+  - "掌握张量的基本算术运算"
+prerequisites: ["python-basics", "numpy-fundamentals"]
+keywords: ["tensor", "张量", "shape", "dtype", "device", "cuda", "广播"]
+---
+
+## 什么是张量？
+
+张量（Tensor）是深度学习中数据的基本单位。从数学角度看，张量是标量、向量和矩阵向更高维度的推广：
+
+| 数学概念 | 张量维度 | 示例 | PyTorch 形状 |
+|---------|---------|------|-------------|
+| 标量 (Scalar) | 0 维 | 单个数字 5.0 | `torch.Size([])` |
+| 向量 (Vector) | 1 维 | [1.0, 2.0, 3.0] | `torch.Size([3])` |
+| 矩阵 (Matrix) | 2 维 | 3行4列的表格 | `torch.Size([3, 4])` |
+| 3D 张量 | 3 维 | 一张 RGB 图片 | `torch.Size([3, 224, 224])` |
+| 4D 张量 | 4 维 | 一批图片 | `torch.Size([32, 3, 224, 224])` |
+| 5D 张量 | 5 维 | 一批视频帧 | `torch.Size([4, 16, 3, 224, 224])` |
+
+### 深度学习中的典型张量形状
+
+```python
+import torch
+
+# 标量 - 单个损失值
+loss = torch.tensor(0.532)
+print(f"损失值: {loss}, 形状: {loss.shape}")  # torch.Size([])
+
+# 向量 - 偏置项，10 个神经元
+bias = torch.zeros(10)
+print(f"偏置: {bias.shape}")  # torch.Size([10])
+
+# 矩阵 - 权重矩阵，784 输入 -> 256 隐藏
+weight = torch.randn(784, 256)
+print(f"权重矩阵: {weight.shape}")  # torch.Size([784, 256])
+
+# 3D 张量 - 一批文本的词向量 (批次, 序列长度, 嵌入维度)
+embeddings = torch.randn(2, 10, 512)
+print(f"词嵌入: {embeddings.shape}")  # torch.Size([2, 10, 512])
+
+# 4D 张量 - 一批图像 (批次, 通道, 高度, 宽度)
+images = torch.randn(32, 3, 224, 224)
+print(f"图像批次: {images.shape}")  # torch.Size([32, 3, 224, 224])
+```
+
+## 张量的核心属性
+
+每个张量都有四个关键属性：
+
+```python
+import torch
+
+# 创建一个示例张量
+x = torch.randn(2, 3, dtype=torch.float32, device="cpu")
+
+print(f"张量 x:\n{x}\n")
+print(f"shape (形状):     {x.shape}")        # torch.Size([2, 3])
+print(f"ndim (维度数):    {x.ndim}")          # 2
+print(f"dtype (数据类型):  {x.dtype}")         # torch.float32
+print(f"device (设备):    {x.device}")         # cpu
+print(f"requires_grad:   {x.requires_grad}") # False
+print(f"size(0) (第0维大小): {x.size(0)}")    # 2
+print(f"numel (元素总数):  {x.numel()}")        # 6
+```
+
+### 属性详解
+
+- **shape / size**: 张量每个维度的大小。`torch.Size([2, 3])` 表示 2 行 3 列
+- **ndim / dim()**: 张量的维度数（轴的个数）
+- **dtype**: 张量中元素的数据类型，决定了精度和内存占用
+- **device**: 张量存储的位置（CPU 或 GPU）
+- **requires_grad**: 是否需要 PyTorch 自动计算该张量的梯度
+- **numel()**: 张量中所有元素的总数
+
+## 创建张量
+
+PyTorch 提供了丰富的张量创建函数，可以覆盖几乎所有场景。
+
+### 从已有数据创建
+
+```python
+import torch
+import numpy as np
+
+# 1. 从 Python 列表创建
+data_list = [[1, 2, 3], [4, 5, 6]]
+t_from_list = torch.tensor(data_list)
+print(f"从列表创建:\n{t_from_list}\n")
+
+# 2. 从 NumPy 数组创建（共享内存！）
+np_array = np.array([[1.0, 2.0], [3.0, 4.0]])
+t_from_np = torch.from_numpy(np_array)  # 共享内存
+print(f"从 NumPy 创建:\n{t_from_np}\n")
+
+# 修改 NumPy 数组会影响张量
+np_array[0, 0] = 99.0
+print(f"修改 NumPy 后张量也变了:\n{t_from_np}\n")
+
+# 3. torch.tensor() vs torch.as_tensor()
+# torch.tensor() 始终复制数据
+# torch.as_tensor() 尽可能共享内存
+original = np.array([1, 2, 3])
+t_copy = torch.tensor(original)     # 复制
+t_share = torch.as_tensor(original) # 共享
+original[0] = 999
+print(f"torch.tensor (不共享): {t_copy}")   # [1, 2, 3]
+print(f"torch.as_tensor (共享): {t_share}") # [999, 2, 3]
+```
+
+### 创建特定值的张量
+
+```python
+import torch
+
+# 全零张量 - 常用于初始化偏置
+zeros = torch.zeros(3, 4)
+print(f"全零张量 (3x4):\n{zeros}\n")
+
+# 全一张量 - 常用于初始化缩放因子
+ones = torch.ones(2, 3)
+print(f"全一张量 (2x3):\n{ones}\n")
+
+# 指定填充值
+filled = torch.full((2, 2), fill_value=3.14)
+print(f"填充值 3.14:\n{filled}\n")
+
+# 单位矩阵 - 常用于线性代数
+identity = torch.eye(3)
+print(f"单位矩阵 (3x3):\n{identity}\n")
+```
+
+### 创建随机张量
+
+```python
+import torch
+
+# 设置随机种子，保证可复现
+torch.manual_seed(42)
+
+# 均匀分布 [0, 1)
+rand_uniform = torch.rand(2, 3)
+print(f"均匀分布 [0,1):\n{rand_uniform}\n")
+
+# 标准正态分布 N(0, 1)
+rand_normal = torch.randn(2, 3)
+print(f"标准正态分布:\n{rand_normal}\n")
+
+# 均匀分布 [low, high)
+rand_range = torch.randint(0, 10, (2, 3))  # 整数 [0, 10)
+print(f"整数均匀分布:\n{rand_range}\n")
+
+# 指定均值和标准差的正态分布
+rand_custom = torch.normal(mean=0.5, std=0.1, size=(2, 3))
+print(f"自定义正态分布 N(0.5, 0.1):\n{rand_custom}\n")
+
+# 随机排列
+perm = torch.randperm(10)
+print(f"0-9 的随机排列: {perm}")
+
+# torch.rand_like / torch.zeros_like - 创建与已有张量形状相同的张量
+x = torch.randn(2, 3)
+zeros_like_x = torch.zeros_like(x)
+print(f"\nzeros_like 创建与 x 形状相同的全零张量:\n{zeros_like_x}")
+```
+
+### 创建序列张量
+
+```python
+import torch
+
+# arange - 等步长序列
+# torch.arange(start, end, step) 注意不包含 end
+seq1 = torch.arange(0, 10, 2)     # [0, 2, 4, 6, 8]
+print(f"arange(0,10,2): {seq1}")
+
+seq2 = torch.arange(5)            # [0, 1, 2, 3, 4]
+print(f"arange(5):     {seq2}")
+
+# linspace - 等间距序列（包含 end）
+seq3 = torch.linspace(0, 1, steps=5)  # [0.00, 0.25, 0.50, 0.75, 1.00]
+print(f"linspace(0,1,5): {seq3}")
+
+# logspace - 对数等间距序列
+seq4 = torch.logspace(0, 2, steps=3)  # [1, 10, 100] 即 [10^0, 10^1, 10^2]
+print(f"logspace(0,2,3): {seq4}")
+```
+
+## 数据类型（dtype）
+
+PyTorch 支持丰富的数据类型，选择合适的 dtype 对性能和精度至关重要。
+
+```python
+import torch
+
+print("=== 常见数据类型 ===\n")
+
+# 浮点类型
+# torch.float32 (torch.float) - 32 位浮点，最常用
+# torch.float64 (torch.double) - 64 位浮点，高精度
+# torch.float16 (torch.half) - 16 位浮点，省内存，混合精度训练
+
+# 整数类型
+# torch.int64 (torch.long) - 64 位整数，常用于索引
+# torch.int32 (torch.int) - 32 位整数
+# torch.int16 (torch.short) - 16 位整数
+# torch.int8 - 8 位整数，量化推理
+
+# 布尔类型
+# torch.bool - 布尔值 True/False
+
+# 创建不同 dtype 的张量
+x_float32 = torch.tensor([1, 2, 3], dtype=torch.float32)
+x_float64 = torch.tensor([1, 2, 3], dtype=torch.float64)
+x_int64 = torch.tensor([1, 2, 3], dtype=torch.int64)
+x_bool = torch.tensor([1, 0, 1], dtype=torch.bool)
+
+print(f"float32: {x_float32.dtype}, 元素大小: {x_float32.element_size()} 字节")
+print(f"float64: {x_float64.dtype}, 元素大小: {x_float64.element_size()} 字节")
+print(f"int64:   {x_int64.dtype}, 元素大小: {x_int64.element_size()} 字节")
+print(f"bool:    {x_bool.dtype}, 元素大小: {x_bool.element_size()} 字节\n")
+
+# 类型转换
+x = torch.tensor([1.5, 2.7, 3.2])
+print(f"原始 float32: {x}")
+print(f"转 int64:     {x.long()}")      # 截断为整数
+print(f"转 float64:   {x.double()}")
+print(f"转 float16:   {x.half()}")
+print(f"用 .to():     {x.to(torch.int32)}")
+
+# 默认数据类型
+print(f"\n默认浮点类型: {torch.get_default_dtype()}")  # torch.float32
+# 可以修改默认类型（但不推荐）
+# torch.set_default_dtype(torch.float64)
+```
+
+## 设备：CPU 与 CUDA
+
+张量可以存储在 CPU 内存或 GPU 显存中。
+
+```python
+import torch
+
+# 创建设备对象
+cpu_device = torch.device("cpu")
+print(f"CPU 设备: {cpu_device}")
+
+if torch.cuda.is_available():
+    cuda_device = torch.device("cuda")       # 默认 GPU (cuda:0)
+    cuda_device_1 = torch.device("cuda:1")   # 第二块 GPU
+    print(f"CUDA 设备: {cuda_device}")
+
+    # 方法一：创建时指定
+    x_gpu = torch.randn(3, 3, device="cuda")
+    print(f"GPU 张量: {x_gpu.device}")
+
+    # 方法二：用 .to() 移动
+    x_cpu = torch.randn(3, 3)
+    x_gpu = x_cpu.to("cuda")
+    print(f"移动到 GPU: {x_gpu.device}")
+
+    # 方法三：用 .cuda()
+    x_gpu = x_cpu.cuda()
+    print(f"用 .cuda(): {x_gpu.device}")
+
+    # 方法四：创建时用 device 参数
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    x = torch.randn(3, 3, device=device)
+    print(f"设备无关代码: {x.device}")
+else:
+    print("未检测到 CUDA，以下示例均在 CPU 上运行")
+```
+
+## 基本算术运算
+
+PyTorch 支持与 NumPy 风格类似的张量运算。
+
+```python
+import torch
+
+a = torch.tensor([1.0, 2.0, 3.0])
+b = torch.tensor([4.0, 5.0, 6.0])
+
+print(f"a = {a}")
+print(f"b = {b}\n")
+
+# === 逐元素运算 ===
+print(f"a + b  = {a + b}")           # 加法
+print(f"a - b  = {a - b}")           # 减法
+print(f"a * b  = {a * b}")           # 逐元素乘法（不是点积！）
+print(f"a / b  = {a / b}")           # 除法
+print(f"a ** 2 = {a ** 2}")          # 幂运算
+
+# 使用 torch 函数（功能等价）
+print(f"\ntorch.add(a, b) = {torch.add(a, b)}")
+print(f"torch.mul(a, b) = {torch.mul(a, b)}")
+print(f"torch.div(a, b) = {torch.div(a, b)}")
+
+# === 矩阵乘法 ===
+A = torch.randn(2, 3)
+B = torch.randn(3, 4)
+
+# 三种等价的矩阵乘法方式
+C1 = A @ B                    # Python 3.5+ 的 @ 运算符
+C2 = torch.matmul(A, B)       # matmul 函数
+C3 = torch.mm(A, B)           # mm 只支持 2D 矩阵
+print(f"\n矩阵乘法 A(2x3) @ B(3x4) = C(2x4):")
+print(f"结果形状: {C1.shape}")
+print(f"三种方式结果相等: {torch.allclose(C1, C2) and torch.allclose(C2, C3)}")
+
+# === 广播运算 ===
+x = torch.tensor([[1.0, 2.0, 3.0],
+                   [4.0, 5.0, 6.0]])  # shape (2, 3)
+scalar = 2.0
+vector = torch.tensor([1.0, 2.0, 3.0])  # shape (3,)
+
+print(f"\n标量广播: x * 2 =\n{x * scalar}")
+print(f"向量广播: x + vector =\n{x + vector}")
+
+# === 数学函数 ===
+x = torch.tensor([0.0, 1.0, 4.0, 9.0])
+print(f"\nsqrt({x}) = {torch.sqrt(x)}")
+print(f"exp({x})  = {torch.exp(x)}")
+print(f"log({x}+1) = {torch.log1p(x)}")
+print(f"abs({-x})  = {torch.abs(-x)}")
+print(f"sin({x})   = {torch.sin(x)}")
+```
+
+### 原地操作（In-place Operations）
+
+PyTorch 中带有尾部下划线 `_` 的方法会直接修改原张量，而不是返回新张量。
+
+```python
+import torch
+
+x = torch.tensor([1.0, 2.0, 3.0])
+print(f"初始 x: {x}")
+
+# 原地加法
+x.add_(5)     # 等价于 x = x + 5
+print(f"x.add_(5) 后: {x}")
+
+# 原地乘法
+x.mul_(2)     # 等价于 x = x * 2
+print(f"x.mul_(2) 后: {x}")
+
+# 原地填充
+x.zero_()
+print(f"x.zero_() 后: {x}")
+
+# ⚠️ 注意：原地操作会破坏计算图，在需要梯度时需谨慎使用
+# 通常只在不需要梯度的场景（如参数更新）中使用
+w = torch.tensor(2.0, requires_grad=True)
+# w.add_(1)  # 会报错！带梯度的叶张量不能原地修改
+# 正确做法：
+with torch.no_grad():
+    w.add_(1)  # 在 no_grad 下可以原地修改
+```
+
+## 本节小结
+
+- 张量是标量、向量、矩阵的泛化，是深度学习的数据载体
+- 每个张量有 shape, dtype, device, requires_grad 四个核心属性
+- PyTorch 提供了从列表、NumPy 数组、常量、随机分布等多种创建方式
+- 数据类型选择影响精度和内存，float32 是最常用的默认类型
+- 张量可以存储在 CPU 或 GPU 上
+- 算术运算语法与 NumPy 高度一致，支持广播机制
+
+在下一课中，我们将学习张量的索引切片、形状变换以及更高级的操作。

@@ -1,0 +1,581 @@
+---
+title: "强化学习基础：从 MDP 到 DQN"
+description: "系统学习强化学习的核心概念、Bellman 方程、Q-Learning 和 DQN，并用 PyTorch 实现 CartPole 训练"
+part: "05-advanced-topics"
+order: 6
+difficulty: "advanced"
+estimatedMinutes: 45
+objectives:
+  - "掌握 MDP（马尔可夫决策过程）的五要素"
+  - "理解价值函数 V(s)、Q(s,a) 和 Bellman 方程"
+  - "掌握 Q-Learning 的 TD 更新与 epsilon-greedy 探索"
+  - "实现完整的 DQN：经验回放 + 目标网络 + PyTorch"
+  - "了解 Policy Gradient 和 REINFORCE 算法"
+prerequisites: ["python-basics", "numpy-fundamentals"]
+keywords: ["reinforcement-learning", "DQN", "Q-learning", "Bellman-equation", "policy-gradient", "MDP"]
+---
+
+# 一、强化学习框架
+
+强化学习（Reinforcement Learning, RL）是一种通过与环境交互来学习如何决策的机器学习范式。它的核心元素包括：
+
+- **智能体（Agent）**：做决策的实体
+- **环境（Environment）**：智能体所处的外部世界
+- **状态（State）$s_t$**：环境在时刻 $t$ 的描述
+- **动作（Action）$a_t$**：智能体可采取的行为
+- **奖励（Reward）$r_t$**：环境对动作的即时反馈
+
+交互循环：智能体观察状态 $s_t$ → 选择动作 $a_t$ → 环境返回下一状态 $s_{t+1}$ 和奖励 $r_{t+1}$ → 循环往复。智能体的目标是最大化**累积折扣奖励**：
+
+$$
+G_t = r_{t+1} + \gamma r_{t+2} + \gamma^2 r_{t+3} + \cdots = \sum_{k=0}^{\infty} \gamma^k r_{t+k+1}
+$$
+
+其中 $\gamma \in [0, 1]$ 是折扣因子（discount factor），控制对未来奖励的重视程度。$\gamma=0$ 说明智能体只看眼前，$\gamma \approx 1$ 说明它目光长远。
+
+# 二、马尔可夫决策过程 (MDP)
+
+MDP 是 RL 的数学框架，由五元组 $(\mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, \gamma)$ 定义：
+
+- $\mathcal{S}$：状态空间（所有可能的状态）
+- $\mathcal{A}$：动作空间（所有可能的动作）
+- $\mathcal{P}(s' \mid s, a)$：状态转移概率——从 $s$ 采取 $a$ 后进入 $s'$ 的概率
+- $\mathcal{R}(s, a)$：奖励函数
+- $\gamma \in [0,1]$：折扣因子
+
+**马尔可夫性质**：下一状态 $s_{t+1}$ 只依赖于当前状态 $s_t$ 和动作 $a_t$，与历史无关：
+
+$$
+P(s_{t+1} \mid s_t, a_t, s_{t-1}, a_{t-1}, \ldots) = P(s_{t+1} \mid s_t, a_t)
+$$
+
+这是 RL 算法的根本前提——如果没有马尔可夫性质，仅凭当前状态是无法做出最优决策的。
+
+# 三、策略与价值函数
+
+**策略（Policy）$\pi$** 定义了智能体在每个状态下如何选择动作：
+
+- 确定性策略：$a = \pi(s)$，给定状态直接输出动作
+- 随机性策略：$\pi(a \mid s) = P(A_t = a \mid S_t = s)$
+
+**状态价值函数 $V^\pi(s)$**：从状态 $s$ 开始，遵循策略 $\pi$ 所能获得的期望累积奖励：
+
+$$
+V^\pi(s) = \mathbb{E}_\pi\left[ G_t \mid S_t = s \right]
+$$
+
+**动作价值函数 $Q^\pi(s, a)$**：在状态 $s$ 采取动作 $a$ 后，遵循策略 $\pi$ 的期望累积奖励：
+
+$$
+Q^\pi(s, a) = \mathbb{E}_\pi\left[ G_t \mid S_t = s, A_t = a \right]
+$$
+
+两者之间的关系：
+
+$$V^\pi(s) = \sum_{a} \pi(a \mid s) Q^\pi(s, a)$$
+
+# 四、Bellman 方程
+
+Bellman 方程揭示了价值函数的**递归结构**，是几乎所有 RL 算法的理论基础：
+
+**状态价值函数的 Bellman 方程**：
+
+$$
+V^\pi(s) = \sum_{a} \pi(a \mid s) \sum_{s'} P(s' \mid s, a) \left[ \mathcal{R}(s, a) + \gamma V^\pi(s') \right]
+$$
+
+**动作价值函数的 Bellman 方程**：
+
+$$
+Q^\pi(s, a) = \sum_{s'} P(s' \mid s, a) \left[ \mathcal{R}(s, a) + \gamma \sum_{a'} \pi(a' \mid s') Q^\pi(s', a') \right]
+$$
+
+**最优 Bellman 方程**（Optimal Bellman Equation）：对于最优 Q 函数 $Q^*$：
+
+$$
+Q^*(s, a) = \mathbb{E}_{s'}\left[ r + \gamma \max_{a'} Q^*(s', a') \mid s, a \right]
+$$
+
+这告诉我们：最优动作的价值 = 即时奖励 + 下一状态最优动作价值的折扣期望。
+
+# 五、Q-Learning
+
+Q-Learning 是一种**离线（off-policy）时序差分（Temporal Difference, TD）**学习算法。更新规则如下：
+
+$$
+Q(s, a) \leftarrow Q(s, a) + \alpha \left[ r + \gamma \max_{a'} Q(s', a') - Q(s, a) \right]
+$$
+
+其中 $\alpha$ 是学习率。方括号内的部分称为 **TD 误差（TD Error）**——当前估计值与更好的估计（TD 目标）之间的差距。
+
+```python
+import numpy as np
+from collections import deque
+import random
+
+class QLearningAgent:
+    """表格型 Q-Learning 智能体"""
+    def __init__(self, n_states, n_actions, alpha=0.1, gamma=0.99,
+                 epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995):
+        self.n_actions = n_actions
+        self.alpha = alpha      # 学习率
+        self.gamma = gamma      # 折扣因子
+        self.epsilon = epsilon  # 探索率
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+
+        # Q 表： (n_states, n_actions) 初始化为零
+        self.q_table = np.zeros((n_states, n_actions))
+
+    def choose_action(self, state):
+        """epsilon-greedy 动作选择"""
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.n_actions)  # 探索
+        else:
+            return np.argmax(self.q_table[state])      # 利用
+
+    def learn(self, state, action, reward, next_state, done):
+        """Q-Learning TD 更新"""
+        # 计算 TD 目标
+        if done:
+            td_target = reward
+        else:
+            td_target = reward + self.gamma * np.max(self.q_table[next_state])
+
+        # TD 误差
+        td_error = td_target - self.q_table[state, action]
+
+        # 更新 Q 值
+        self.q_table[state, action] += self.alpha * td_error
+
+    def decay_epsilon(self):
+        """衰减探索率"""
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
+
+def run_qlearning_example():
+    """在简化环境中演示 Q-Learning"""
+    n_states = 10
+    n_actions = 3
+    agent = QLearningAgent(n_states, n_actions)
+    n_episodes = 500
+
+    rewards_history = []
+
+    for episode in range(n_episodes):
+        state = 0  # 起始状态
+        total_reward = 0
+        done = False
+
+        while not done:
+            action = agent.choose_action(state)
+
+            # 简单的手工环境：往前走获得+1，后退获得-0.5，到达终点获得+10
+            if action == 0:    # 前进
+                next_state = min(state + 1, n_states - 1)
+                reward = 1.0
+            elif action == 1:  # 后退
+                next_state = max(state - 1, 0)
+                reward = -0.5
+            else:              # 停留
+                next_state = state
+                reward = -0.1
+
+            done = (next_state == n_states - 1)
+            if done:
+                reward = 10.0  # 到达终点奖励
+
+            agent.learn(state, action, reward, next_state, done)
+            state = next_state
+            total_reward += reward
+
+        agent.decay_epsilon()
+        rewards_history.append(total_reward)
+
+        if episode % 100 == 0:
+            avg_reward = np.mean(rewards_history[-100:])
+            print(f"Episode {episode:4d} | 平均奖励: {avg_reward:7.2f} | epsilon: {agent.epsilon:.3f}")
+
+    print(f"\n学到的 Q 表:\n{agent.q_table}")
+    return agent
+
+# agent = run_qlearning_example()
+print("Q-Learning 示例定义完毕")
+```
+
+# 六、Deep Q-Network (DQN)
+
+当状态空间很大或连续时（如图像输入），表格型 Q-Learning 不再可行。DQN 用神经网络来近似 Q 函数 $Q(s, a; \theta)$。
+
+DQN 的两个关键创新：
+
+1. **经验回放（Experience Replay）**：将经验 $(s, a, r, s', \text{done})$ 存入缓冲区，训练时随机采样，打破样本间的时间相关性
+2. **目标网络（Target Network）**：维护一个独立的 Q 网络（参数 $\theta^-$），周期性地从主网络复制参数，稳定训练
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+from collections import deque
+import random
+
+# ---- 经验回放缓冲区 ----
+class ReplayBuffer:
+    def __init__(self, capacity=10000):
+        self.buffer = deque(maxlen=capacity)
+
+    def push(self, state, action, reward, next_state, done):
+        self.buffer.append((state, action, reward, next_state, done))
+
+    def sample(self, batch_size):
+        batch = random.sample(self.buffer, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+
+        return (
+            torch.FloatTensor(np.array(states)),
+            torch.LongTensor(actions),
+            torch.FloatTensor(rewards),
+            torch.FloatTensor(np.array(next_states)),
+            torch.FloatTensor(dones),
+        )
+
+    def __len__(self):
+        return len(self.buffer)
+
+
+# ---- DQN 网络 ----
+class DQN(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)  # (batch, action_dim) — 每个动作的 Q 值
+
+
+# ---- DQN 智能体 ----
+class DQNAgent:
+    def __init__(self, state_dim, action_dim, lr=1e-3, gamma=0.99,
+                 epsilon=1.0, epsilon_min=0.01, epsilon_decay=0.995,
+                 buffer_capacity=10000, batch_size=64, target_update=100):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update = target_update
+
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        # 主网络和目标网络
+        self.q_network = DQN(state_dim, action_dim).to(self.device)
+        self.target_network = DQN(state_dim, action_dim).to(self.device)
+        self.target_network.load_state_dict(self.q_network.state_dict())
+
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
+        self.replay_buffer = ReplayBuffer(buffer_capacity)
+
+        self.step_count = 0
+
+    def choose_action(self, state, eval_mode=False):
+        """epsilon-greedy 动作选择"""
+        if not eval_mode and np.random.random() < self.epsilon:
+            return np.random.randint(self.action_dim)
+
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            q_values = self.q_network(state_tensor)
+        return q_values.argmax(dim=1).item()
+
+    def update(self):
+        """从经验回放中采样并更新 Q 网络"""
+        if len(self.replay_buffer) < self.batch_size:
+            return None
+
+        # 从缓冲区采样
+        states, actions, rewards, next_states, dones = self.replay_buffer.sample(
+            self.batch_size
+        )
+        states = states.to(self.device)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        next_states = next_states.to(self.device)
+        dones = dones.to(self.device)
+
+        # 当前 Q 值：Q(s, a)
+        current_q = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze()
+
+        # 目标 Q 值：r + γ * max_{a'} Q_target(s', a')
+        with torch.no_grad():
+            next_q = self.target_network(next_states).max(dim=1).values
+            target_q = rewards + self.gamma * next_q * (1 - dones)
+
+        # TD 误差损失（Huber Loss 更稳定）
+        loss = F.smooth_l1_loss(current_q, target_q)
+
+        # 优化
+        self.optimizer.zero_grad()
+        loss.backward()
+        # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=10.0)
+        self.optimizer.step()
+
+        # 定期更新目标网络
+        self.step_count += 1
+        if self.step_count % self.target_update == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+
+        # 衰减 epsilon
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+
+        return loss.item()
+```
+
+# 七、完整的 DQN 训练：CartPole
+
+CartPole 是 RL 的经典测试环境：一根杆子立在推车上，智能体通过左右移动推车来保持杆子不倒。
+
+```python
+import gymnasium as gym
+
+def train_dqn_cartpole(num_episodes=500, render=False):
+    """在 CartPole 环境上训练 DQN"""
+    # 创建环境
+    env = gym.make('CartPole-v1')
+    state_dim = env.observation_space.shape[0]  # 4: 位置, 速度, 角度, 角速度
+    action_dim = env.action_space.n             # 2: 左推, 右推
+
+    agent = DQNAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        lr=1e-3,
+        gamma=0.99,
+        epsilon=1.0,
+        epsilon_min=0.01,
+        epsilon_decay=0.995,
+        buffer_capacity=50000,
+        batch_size=64,
+        target_update=100,
+    )
+
+    episode_rewards = []
+    recent_rewards = deque(maxlen=100)
+
+    for episode in range(num_episodes):
+        state, _ = env.reset()
+        total_reward = 0
+        done = False
+
+        while not done:
+            action = agent.choose_action(state)
+            next_state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+
+            # 存入经验回放
+            agent.replay_buffer.push(state, action, reward, next_state, float(done))
+
+            # 更新网络
+            loss = agent.update()
+
+            state = next_state
+            total_reward += reward
+
+        episode_rewards.append(total_reward)
+        recent_rewards.append(total_reward)
+
+        avg_reward = np.mean(recent_rewards)
+
+        if episode % 20 == 0:
+            print(f"Ep {episode:4d} | 奖励: {total_reward:6.1f} | "
+                  f"平均100轮: {avg_reward:6.1f} | epsilon: {agent.epsilon:.3f} | "
+                  f"缓冲区: {len(agent.replay_buffer):5d}")
+
+        # 如果平均奖励达到阈值，视为已解决
+        if avg_reward >= 475 and episode >= 100:
+            print(f"\n环境在第 {episode} 轮被解决! (平均奖励 {avg_reward:.1f} >= 475)")
+            break
+
+    env.close()
+    return agent, episode_rewards
+
+# 取消注释以运行训练
+# agent, rewards = train_dqn_cartpole(num_episodes=500)
+print("DQN CartPole 训练代码就绪")
+```
+
+```python
+# ---- 评估训练好的智能体 ----
+def evaluate_dqn(agent, env_name='CartPole-v1', num_episodes=10, render=False):
+    """评估 DQN 智能体的性能"""
+    env = gym.make(env_name, render_mode='human' if render else None)
+    total_rewards = []
+
+    for ep in range(num_episodes):
+        state, _ = env.reset()
+        total_reward = 0
+        done = False
+
+        while not done:
+            action = agent.choose_action(state, eval_mode=True)
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+            total_reward += reward
+
+        total_rewards.append(total_reward)
+        print(f"评估 Episode {ep+1}: 奖励 = {total_reward}")
+
+    print(f"\n平均奖励: {np.mean(total_rewards):.1f} +/- {np.std(total_rewards):.1f}")
+    env.close()
+    return total_rewards
+
+# evaluate_dqn(agent, render=True)
+```
+
+# 八、Policy Gradient 与 REINFORCE
+
+与值函数方法不同，Policy Gradient 方法直接优化策略 $\pi_\theta(a \mid s)$。REINFORCE 是最基础的策略梯度算法：
+
+$$
+\nabla_\theta J(\theta) = \mathbb{E}_\pi \left[ \sum_{t=0}^{T} \nabla_\theta \log \pi_\theta(a_t \mid s_t) \cdot G_t \right]
+$$
+
+直观理解：如果一个动作带来了高于预期的回报（$G_t$ 大），就增加它的概率；如果回报低，就减少。
+
+```python
+class PolicyNetwork(nn.Module):
+    """REINFORCE 策略网络"""
+    def __init__(self, state_dim, action_dim, hidden_dim=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, x):
+        logits = self.net(x)
+        return F.softmax(logits, dim=-1)
+
+    def get_action_and_logprob(self, state):
+        """返回动作和对数概率"""
+        state_tensor = torch.FloatTensor(state).unsqueeze(0)
+        probs = self.forward(state_tensor)
+        dist = torch.distributions.Categorical(probs)
+        action = dist.sample()
+        log_prob = dist.log_prob(action)
+        return action.item(), log_prob
+
+
+def train_reinforce(env_name='CartPole-v1', num_episodes=1000, gamma=0.99, lr=1e-2):
+    """REINFORCE 训练"""
+    env = gym.make(env_name)
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+
+    policy = PolicyNetwork(state_dim, action_dim)
+    optimizer = optim.Adam(policy.parameters(), lr=lr)
+
+    episode_rewards = []
+
+    for episode in range(num_episodes):
+        state, _ = env.reset()
+        log_probs = []
+        rewards = []
+        done = False
+
+        # 收集一整个 trajectory
+        while not done:
+            action, log_prob = policy.get_action_and_logprob(state)
+            state, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+
+            log_probs.append(log_prob)
+            rewards.append(reward)
+
+        # 计算折扣回报 G_t（从后往前）
+        returns = []
+        G = 0
+        for r in reversed(rewards):
+            G = r + gamma * G
+            returns.insert(0, G)
+
+        returns = torch.tensor(returns)
+        # 标准化回报（减少方差）
+        returns = (returns - returns.mean()) / (returns.std() + 1e-9)
+
+        # 策略梯度损失
+        policy_loss = []
+        for log_prob, G in zip(log_probs, returns):
+            policy_loss.append(-log_prob * G)
+        policy_loss = torch.stack(policy_loss).sum()
+
+        # 更新
+        optimizer.zero_grad()
+        policy_loss.backward()
+        optimizer.step()
+
+        total_reward = sum(rewards)
+        episode_rewards.append(total_reward)
+
+        if episode % 50 == 0:
+            avg_r = np.mean(episode_rewards[-50:])
+            print(f"Episode {episode:4d} | 总奖励: {total_reward:6.1f} | 平均50轮: {avg_r:6.1f}")
+
+    env.close()
+    return policy, episode_rewards
+
+# policy, rewards = train_reinforce(num_episodes=500)
+print("REINFORCE 代码就绪")
+```
+
+# 九、探索 vs 利用（Exploration vs Exploitation）
+
+这是 RL 中最核心的权衡之一：
+
+- **探索（Exploration）**：尝试新的动作，发现潜在的高回报策略
+- **利用（Exploitation）**：选择当前已知的最佳动作，最大化短期回报
+
+常见探索策略：
+
+| 策略 | 原理 | 优缺点 |
+|------|------|--------|
+| $\epsilon$-greedy | 以概率 $\epsilon$ 随机探索 | 简单，但盲目探索 |
+| Boltzmann / Softmax | 按 Q 值 softmax 分布采样 | 利用价值信息，但温度难调 |
+| UCB (Upper Confidence Bound) | $a = \arg\max \left[ Q(s,a) + c\sqrt{\frac{\ln t}{N(s,a)}} \right]$ | 理论优雅，鼓励访问少的状态 |
+
+# 十、RL 的应用与挑战
+
+**应用领域**：
+- 游戏 AI：AlphaGo, OpenAI Five, 星际争霸
+- 机器人控制：机械臂抓取、无人机飞行、自动驾驶
+- 推荐系统：长期用户参与度优化
+- LLM 对齐：RLHF 用于 ChatGPT 的人类偏好对齐
+- 芯片设计：Google 用 RL 优化 TPU 芯片布局
+
+**主要挑战**：
+1. **样本效率低**：需要大量交互（百万级），在现实世界中成本高昂
+2. **奖励设计困难**：稀疏奖励问题——很多任务在长时间内没有有意义的学习信号
+3. **稳定性**：训练中策略和价值函数相互影响，容易发散
+4. **Sim-to-Real Gap**：仿真环境中训练的智能体迁移到真实世界时的性能退化
+
+## 总结
+
+| 方法 | 类型 | 核心思想 | 适用场景 |
+|------|------|---------|---------|
+| Q-Learning | 值函数 | $Q(s,a) \leftarrow Q(s,a) + \alpha[\text{TD error}]$ | 离散动作空间 |
+| DQN | 深度值函数 | Q 网络 + 经验回放 + 目标网络 | 高维状态空间 |
+| REINFORCE | 策略梯度 | $\nabla J \propto \nabla \log\pi \cdot G_t$ | 连续动作探索 |
+| Actor-Critic | 混合 | 策略网络 + 价值网络 | 现代 RL 主流 |
+
+强化学习是机器学习中与监督学习、无监督学习并列的第三大范式。虽然实现门槛较高，但它在序列决策问题上的独特优势使其不可或缺——从围棋 AI 到大模型对齐，RL 正在深刻改变人工智能的面貌。

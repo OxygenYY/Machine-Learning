@@ -1,0 +1,446 @@
+---
+title: "Vision Transformer (ViT)：Transformer 走进计算机视觉"
+description: "深入理解 Vision Transformer 的 Patch Embedding、位置编码、CLS Token 机制，以及与 CNN 的对比分析"
+part: "05-advanced-topics"
+order: 3
+difficulty: "advanced"
+estimatedMinutes: 40
+objectives:
+  - "理解 ViT 的核心思想：将图像视为 Patch 序列"
+  - "掌握 Patch Embedding 和 Class Token 机制"
+  - "对比 ViT 和 CNN 的归纳偏置差异"
+  - "学会使用 torchvision 中的预训练 ViT"
+  - "了解 Swin Transformer 等层次化变体"
+prerequisites: ["python-basics", "cnn-pytorch", "transformers-intro"]
+keywords: ["vision-transformer", "vit", "patch-embedding", "image-classification", "swin-transformer"]
+---
+
+# 一、Vision Transformer 的核心思想
+
+Vision Transformer（ViT）的论文标题已经说出了它的精髓：**"An Image is Worth 16x16 Words"**。其核心思想大胆而简洁：将图像切割成固定大小的 Patches，把这些 Patch 当作 NLP 中的 Token，直接喂给标准的 Transformer 编码器。
+
+为什么这令人惊讶？因为在 ViT 之前，人们普遍认为 Transformer 在 CV 中需要与 CNN 结合，或用 CNN 提取特征后再做 Attention。ViT 证明了：**纯 Transformer 架构，只要数据足够多，就能在图像分类上超越 CNN**。
+
+# 二、Patch Embedding：将图像变为序列
+
+给定一张图像 $\mathbf{x} \in \mathbb{R}^{H \times W \times C}$（例如 $224 \times 224 \times 3$），将其划分为 $N = \frac{HW}{P^2}$ 个 $P \times P$ 的 Patch（如 $P=16$，则 $N=14 \times 14=196$）。
+
+每个 Patch 被展平为一个向量 $\mathbf{x}_p \in \mathbb{R}^{P^2 \cdot C}$，然后通过一个可训练的线性投影矩阵 $\mathbf{E} \in \mathbb{R}^{(P^2 \cdot C) \times D}$ 映射到 $D$ 维嵌入空间：
+
+$$
+\mathbf{z}_0 = [\mathbf{x}_{\text{class}}; \mathbf{x}_p^1\mathbf{E}; \mathbf{x}_p^2\mathbf{E}; \ldots; \mathbf{x}_p^N\mathbf{E}] + \mathbf{E}_{pos}
+$$
+
+```python
+import torch
+import torch.nn as nn
+
+class PatchEmbedding(nn.Module):
+    """将图像分割为 Patch 并进行线性投影"""
+    def __init__(self, image_size=224, patch_size=16, in_channels=3, embed_dim=768):
+        super().__init__()
+        self.image_size = image_size
+        self.patch_size = patch_size
+        self.num_patches = (image_size // patch_size) ** 2
+
+        # 使用一个二维卷积高效地实现 patch 分割 + 投影
+        # kernel_size=patch_size, stride=patch_size → 不重叠的滑动窗口
+        self.proj = nn.Conv2d(
+            in_channels, embed_dim,
+            kernel_size=patch_size, stride=patch_size
+        )
+
+    def forward(self, x):
+        # x: (batch, C, H, W)
+        x = self.proj(x)                      # (batch, embed_dim, H/P, W/P)
+        x = x.flatten(2)                       # (batch, embed_dim, num_patches)
+        x = x.transpose(1, 2)                  # (batch, num_patches, embed_dim)
+        return x
+
+# 测试 Patch Embedding
+img = torch.randn(2, 3, 224, 224)   # 2 张 224x224 RGB 图像
+patch_embed = PatchEmbedding(image_size=224, patch_size=16, embed_dim=768)
+tokens = patch_embed(img)
+print(f"Patch 嵌入输出形状: {tokens.shape}")  # (2, 196, 768)
+print(f"Patch 数量: {tokens.shape[1]}")
+```
+
+也可以手动实现以加深理解：
+
+```python
+def manual_patch_embedding(x, patch_size=16):
+    """
+    手动实现 Patch 切分和展平，理解底层操作
+    x: (C, H, W) 单张图像
+    返回: (num_patches, patch_size*patch_size*C) 的 tensor
+    """
+    C, H, W = x.shape
+    assert H % patch_size == 0 and W % patch_size == 0
+
+    patches = []
+    for i in range(0, H, patch_size):
+        for j in range(0, W, patch_size):
+            patch = x[:, i:i+patch_size, j:j+patch_size]
+            patches.append(patch.flatten())
+
+    patches = torch.stack(patches, dim=0)  # (num_patches, P*P*C)
+    print(f"手动切分: {H//patch_size}x{W//patch_size} = {patches.shape[0]} 个 patch")
+    return patches
+
+# 单张图像测试
+sample = torch.randn(3, 224, 224)
+manual_patches = manual_patch_embedding(sample, patch_size=16)
+```
+
+# 三、Class Token 与位置编码
+
+## Class Token ([CLS])
+
+ViT 在 Patch 序列的最前面添加一个可学习的 `[CLS]` token。这个 token 经过所有 Transformer 层的处理后，其输出被用于最终的分类决策。这种设计借鉴了 BERT。
+
+`[CLS]` token 的作用是**聚合全局信息**——因为自注意力让每个 token 都可以关注所有其他 token，`[CLS]` 在经过多层 Transformer 后自然地从所有 Patches 中收集了判别信息。
+
+```python
+class VisionTransformer(nn.Module):
+    def __init__(self, image_size=224, patch_size=16, in_channels=3,
+                 num_classes=1000, embed_dim=768, depth=12,
+                 n_heads=12, mlp_ratio=4.0, dropout=0.1):
+        super().__init__()
+
+        # Patch Embedding
+        self.patch_embed = PatchEmbedding(image_size, patch_size, in_channels, embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        # CLS Token：可学习的分类向量
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        # 可学习的位置编码： (1, num_patches+1, embed_dim)
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches + 1, embed_dim)
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+        # Transformer 编码器
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=n_heads,
+            dim_feedforward=int(embed_dim * mlp_ratio),
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+
+        # LayerNorm + 分类头
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+        # 初始化权重
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.zeros_(m.bias)
+            nn.init.ones_(m.weight)
+
+    def forward(self, x):
+        batch = x.shape[0]
+
+        # 1. Patch 嵌入
+        x = self.patch_embed(x)  # (batch, num_patches, embed_dim)
+
+        # 2. 添加 CLS Token
+        cls_tokens = self.cls_token.expand(batch, -1, -1)
+        x = torch.cat([cls_tokens, x], dim=1)  # (batch, num_patches+1, embed_dim)
+
+        # 3. 添加位置编码
+        x = x + self.pos_embed
+        x = self.dropout(x)
+
+        # 4. Transformer 编码器
+        x = self.transformer(x)
+
+        # 5. 取出 CLS token 的输出做分类
+        x = self.norm(x)
+        cls_output = x[:, 0]  # 第一个 token = CLS
+        logits = self.head(cls_output)
+
+        return logits
+
+# 创建一个小型 ViT 测试
+vit_small = VisionTransformer(
+    image_size=224, patch_size=16, in_channels=3,
+    num_classes=10, embed_dim=384, depth=6,
+    n_heads=6, mlp_ratio=4.0
+)
+dummy_img = torch.randn(1, 3, 224, 224)
+out = vit_small(dummy_img)
+print(f"ViT 输出形状: {out.shape}")  # (1, 10)
+param_count = sum(p.numel() for p in vit_small.parameters())
+print(f"总参数量: {param_count:,}")
+```
+
+# 四、位置编码的重要性
+
+ViT 使用**可学习的 1D 位置编码**（不是固定的 2D 正弦编码）。因为是可学习的，模型可以自适应地发现 Patch 之间的空间关系。
+
+```python
+# 可视化学到的位置编码相似度
+def visualize_position_encoding_similarity(pos_embed):
+    """
+    pos_embed: (1, num_patches+1, embed_dim)
+    计算各位置编码之间的余弦相似度
+    """
+    import matplotlib.pyplot as plt
+
+    # 去掉 CLS token
+    pe = pos_embed[0, 1:, :]  # (196, D)
+    pe_norm = pe / pe.norm(dim=-1, keepdim=True)
+    sim = pe_norm @ pe_norm.T   # (196, 196) 余弦相似度矩阵
+
+    # 重塑为 2D 网格来可视化空间关系
+    grid_size = int(sim.shape[0] ** 0.5)
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+    # 选取几个位置的 patch，展示它们与其他 patch 的相似度
+    positions = [0, grid_size, 2*grid_size, grid_size*grid_size//2]  # 不同位置
+    for ax, pos in zip(axes, positions):
+        sim_map = sim[pos].reshape(grid_size, grid_size)
+        ax.imshow(sim_map, cmap='RdBu_r', vmin=-1, vmax=1)
+        ax.set_title(f"Patch {pos} 的位置相似度")
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+# visualize_position_encoding_similarity(vit_small.pos_embed.detach())
+```
+
+# 五、ViT 的归纳偏置（Inductive Bias）
+
+与 CNN 不同，ViT 对于图像有**更少的先验假设**：
+
+| 特性 | CNN | ViT |
+|------|-----|-----|
+| 局部性（Locality） | 内置：卷积核只看邻域 | 需从数据中学习 |
+| 平移等变性（Translation Equivariance） | 内置：权重共享 | 需从数据中学习 |
+| 层级结构 | 内置：逐步降采样 | 各层分辨率一致（经典 ViT） |
+| 全局感受野 | 深层才获得 | 第一层就全局 |
+
+CNN 通过卷积和池化天然嵌入了"局部先验"和"平移等变性"，这是一种**强归纳偏置**——在小数据集上很有帮助。ViT 几乎没有这些内置假设，它必须从数据中自己学会这些模式，这意味着：
+
+**ViT 极度依赖大规模数据**。在 ImageNet-21K（1400万张图）或 JFT-300M 上预训练的 ViT 表现优异，而只在小数据集上训练时，ViT 通常不如 CNN。
+
+# 六、使用 torchvision 中的预训练 ViT
+
+```python
+import torch
+import torchvision.models as models
+from torchvision import transforms
+
+# 加载在 ImageNet-21K 上预训练的 ViT-B/16
+vit = models.vit_b_16(weights=models.ViT_B_16_Weights.IMAGENET1K_SWAG_E2E_V1)
+vit.eval()
+
+# 获取正确的预处理
+preprocess = models.ViT_B_16_Weights.IMAGENET1K_SWAG_E2E_V1.transforms()
+
+# 查看模型结构
+print("ViT 结构:")
+for name, module in vit.named_children():
+    total_params = sum(p.numel() for p in module.parameters())
+    print(f"  {name:20s}: {total_params:>12,} 参数")
+
+# 推理示例
+from PIL import Image
+img = Image.open("example.jpg")
+img_tensor = preprocess(img).unsqueeze(0)
+
+with torch.no_grad():
+    logits = vit(img_tensor)
+    probs = torch.softmax(logits, dim=1)
+    top5_prob, top5_idx = torch.topk(probs, 5)
+    print(f"\nTop-5 预测:")
+    for prob, idx in zip(top5_prob[0], top5_idx[0]):
+        print(f"  类别 {idx.item():4d}: {prob.item():.4f}")
+```
+
+# 七、CNN vs ViT：实际对比
+
+```python
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import time
+
+def benchmark_model(model, input_shape=(1, 3, 224, 224), warmup=10, iterations=100):
+    """对比 CNN 和 ViT 的推理速度和参数量"""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device).eval()
+
+    x = torch.randn(*input_shape).to(device)
+
+    # Warmup
+    with torch.no_grad():
+        for _ in range(warmup):
+            _ = model(x)
+
+    # 计时
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
+    with torch.no_grad():
+        for _ in range(iterations):
+            _ = model(x)
+    if device.type == 'cuda':
+        torch.cuda.synchronize()
+
+    elapsed = time.perf_counter() - start
+    params = sum(p.numel() for p in model.parameters())
+    flops_estimate = params * 2  # 粗略估计
+
+    print(f"模型: {model.__class__.__name__:20s} | "
+          f"参数: {params/1e6:6.1f}M | "
+          f"推理时间: {elapsed/iterations*1000:6.2f}ms")
+
+# 对比主流模型
+print("模型               参数      推理时间")
+print("-" * 55)
+
+# ResNet
+benchmark_model(models.resnet50(weights=None))
+
+# EfficientNet
+benchmark_model(models.efficientnet_b0(weights=None))
+
+# ViT
+benchmark_model(models.vit_b_16(weights=None))
+```
+
+# 八、Swin Transformer：层次化视觉 Transformer
+
+经典 ViT 的一个局限是：**所有层保持相同的分辨率**，缺少 CNN 那样的层次化特征金字塔。Swin Transformer 通过两个关键创新解决了这一问题：
+
+1. **层次化结构**：像 CNN 一样逐步降采样（4x → 8x → 16x → 32x），形成特征金字塔
+2. **Shifted Window Attention**：在局部窗口内计算自注意力，交替偏移窗口以建立跨窗口连接。复杂度从 $O(n^2)$ 降至 $O(n)$
+
+```python
+import torchvision.models as models
+
+# 加载 Swin Transformer
+swin = models.swin_t(weights=models.Swin_T_Weights.IMAGENET1K_V1)
+
+# Swin 输出多个阶段的特征图（不同分辨率）
+# Stage 1: 56x56, 96 channels
+# Stage 2: 28x28, 192 channels
+# Stage 3: 14x14, 384 channels
+# Stage 4: 7x7, 768 channels
+
+# 这对检测和分割任务非常有用，因为需要多尺度特征
+dummy = torch.randn(1, 3, 224, 224)
+with torch.no_grad():
+    features = swin.features(dummy)  # 获取层级特征
+    print(f"Swin 各阶段特征形状: {features.shape}")
+
+# 总体比较
+models_list = [
+    ("ResNet50", models.resnet50(weights=None)),
+    ("EfficientNet-B0", models.efficientnet_b0(weights=None)),
+    ("ViT-B/16", models.vit_b_16(weights=None)),
+    ("Swin-T", models.swin_t(weights=None)),
+]
+
+print("\n模型参数量对比:")
+for name, model in models_list:
+    params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"  {name:20s}: {params:6.1f}M 参数")
+```
+
+## Patch Embedding 的可视化
+
+学到的 Patch Embedding 投影矩阵的每一行可以 reshape 成一个图像块：
+
+```python
+def visualize_learned_patches(patch_embed, num_filters=16):
+    """可视化学到的 Patch 嵌入滤波器"""
+    import matplotlib.pyplot as plt
+
+    weight = patch_embed.proj.weight.data  # (768, 3, 16, 16)
+    n = min(num_filters, weight.shape[0])
+
+    fig, axes = plt.subplots(4, n//4, figsize=(n, 4))
+    axes = axes.flatten()
+
+    for i in range(n):
+        # 反归一化以可视化
+        kernel = weight[i]  # (3, 16, 16)
+        kernel = (kernel - kernel.min()) / (kernel.max() - kernel.min() + 1e-8)
+        kernel = kernel.permute(1, 2, 0)  # (16, 16, 3)
+        axes[i].imshow(kernel)
+        axes[i].axis('off')
+
+    plt.suptitle("学到的 Patch 嵌入基底滤波器")
+    plt.tight_layout()
+    plt.show()
+
+# visualize_learned_patches(vit_small.patch_embed)
+```
+
+# 九、ViT 的注意力距离分析
+
+ViT 的一个有趣特性是，我们可以分析不同层中注意力的"有效距离"——即每个 Patch 平均关注多远之外的其他 Patch：
+
+```python
+def compute_attention_distance(attn_weights, grid_size=14):
+    """
+    计算注意力权重的平均空间距离
+    attn_weights: (n_heads, num_patches+1, num_patches+1)
+    grid_size: patch 网格的边长
+    """
+    n_heads = attn_weights.shape[0]
+    # 去掉 CLS token
+    attn_patches = attn_weights[:, 1:, 1:]  # (n_heads, 196, 196)
+
+    # 构造每个 patch 的 2D 坐标
+    coords = torch.stack(torch.meshgrid(
+        torch.arange(grid_size), torch.arange(grid_size), indexing='ij'
+    ), dim=-1).float()  # (14, 14, 2)
+    coords = coords.reshape(-1, 2)  # (196, 2)
+
+    # 计算所有 patch 对之间的欧氏距离
+    dist = torch.cdist(coords, coords)  # (196, 196)
+
+    # 每个头的平均注意力距离
+    mean_distances = []
+    for h in range(n_heads):
+        w = attn_patches[h]  # (196, 196)
+        mean_d = (w * dist).sum() / w.sum()
+        mean_distances.append(mean_d.item())
+
+    return mean_distances
+
+# 输出各头平均注意力距离
+# distances = compute_attention_distance(attn_weights, grid_size=14)
+# for i, d in enumerate(distances):
+#     print(f"Head {i:2d}: 平均注意力距离 = {d:.2f} 个 patch")
+```
+
+## 总结
+
+| 特性 | CNN | ViT | Swin Transformer |
+|------|-----|-----|-----------------|
+| 核心操作 | 卷积 + 池化 | 自注意力 | 窗口注意力 |
+| 归纳偏置 | 强（局部性、平移等变性） | 弱（需从数据学习） | 中等 |
+| 数据需求 | 低 | 极高 | 较高 |
+| 计算复杂度 | $O(k^2 C_{in} C_{out} HW)$ | $O(N^2 D)$ | $O(NWD)$（窗口内） |
+| 适合任务 | 中小数据集分类 | 大数据集分类 | 通用（分类检测分割） |
+
+Vision Transformer 代表了计算机视觉的一次范式转变——从精心设计的 CNN 归纳偏置到让模型从数据中自主发现模式。对于数据充分的场景，ViT 及其变体已经成为首选架构。

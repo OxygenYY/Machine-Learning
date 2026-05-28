@@ -1,0 +1,571 @@
+---
+title: "微积分与优化"
+description: "掌握导数、梯度、链式法则和梯度下降——理解反向传播和模型训练的核心数学"
+part: "00-prerequisites"
+order: 4
+difficulty: "beginner"
+estimatedMinutes: 45
+objectives:
+  - "理解导数的定义和几何意义"
+  - "掌握偏导数和梯度的概念"
+  - "深刻理解链式法则及其在反向传播中的作用"
+  - "掌握梯度下降的迭代优化思想"
+  - "理解凸函数与非凸函数的区别"
+  - "使用 Python 可视化关键微积分概念"
+prerequisites:
+  - "linear-algebra"
+keywords:
+  - "calculus"
+  - "gradient"
+  - "chain rule"
+  - "gradient descent"
+  - "optimization"
+---
+
+## 为什么 ML 工程师需要微积分？
+
+训练机器学习模型的本质是**优化**：找到一组参数，使损失函数的值尽可能小。而找到"下山"方向的方法，就是微积分中的**梯度**。
+
+整个深度学习框架（PyTorch、TensorFlow、JAX）的核心功能是**自动微分 (Autograd)**——它自动计算任意复杂函数的梯度。理解其工作原理（链式法则）将让你：
+- 理解训练为什么收敛（或不收敛）
+- 调试梯度消失/爆炸问题
+- 选择合适的优化器
+- 看懂论文中的数学公式
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+```
+
+## 1. 函数与极限
+
+### 什么是函数？
+
+函数是一个映射 $f: \mathbb{R}^n \to \mathbb{R}^m$。在 ML 中：
+- **模型**是一个函数：输入数据，输出预测
+- **损失函数**是一个函数：输入预测值，输出标量误差
+- **激活函数**是一个函数：输入线性组合，输出非线性变换
+
+```python
+def relu(x):
+    """ML 中最常用的激活函数"""
+    return np.maximum(0, x)
+
+def mse_loss(y_pred, y_true):
+    """均方误差损失"""
+    return np.mean((y_pred - y_true) ** 2)
+
+def linear_model(X, W, b):
+    """最简单的线性模型"""
+    return X @ W + b
+```
+
+### 极限的直观理解
+
+极限 $\lim_{x \to a} f(x) = L$ 的直观理解：当 $x$ 无限接近 $a$ 时，$f(x)$ 无限接近 $L$。
+
+极限是导数的理论基础，但在 ML 实践中你很少需要直接计算极限——理解其直觉就够了。
+
+```python
+# 直观感受极限
+def f(x):
+    return (x**2 - 1) / (x - 1)  # 在 x=1 处未定义，但极限存在
+
+# 从左右两侧趋近 x=1
+for x in [0.9, 0.99, 0.999, 1.001, 1.01, 1.1]:
+    print(f"x = {x:.3f}, f(x) = {f(x):.4f}")
+# 随着 x -> 1, f(x) -> 2
+```
+
+## 2. 导数 — 变化率的度量
+
+### 定义
+
+函数 $f(x)$ 在点 $x$ 处的导数定义为：
+
+$$f'(x) = \lim_{h \to 0} \frac{f(x + h) - f(x)}{h}$$
+
+**几何意义**：导数等于函数曲线在该点的切线斜率。
+
+**ML 意义**：导数告诉我们：**如果我稍微改变参数，损失会如何变化？** 这个信息是优化的关键。
+
+### 基本求导规则
+
+```python
+# 数值微分 — 用代码直观感受导数
+def numerical_derivative(f, x, h=1e-5):
+    """利用导数定义计算数值导数（中心差分法，更精确）"""
+    return (f(x + h) - f(x - h)) / (2 * h)
+
+# 测试函数
+def f(x):
+    return x**2
+
+# 在 x=3 处的导数应该是 2*3 = 6
+print(f"f(x) = x^2")
+print(f"f'(3) 数值计算: {numerical_derivative(f, 3):.4f}")
+print(f"f'(3) 理论值:   {2*3}")
+
+# f(x) = e^x 的导数还是 e^x
+def exp_func(x):
+    return np.exp(x)
+
+for x in [0, 1, 2]:
+    numerical = numerical_derivative(exp_func, x)
+    theoretical = np.exp(x)
+    print(f"x = {x}: 数值导数 = {numerical:.4f}, e^x = {theoretical:.4f}")
+```
+
+### 常用求导公式
+
+| 函数 | 导数 |
+|------|------|
+| $f(x) = c$ | $f'(x) = 0$ |
+| $f(x) = x^n$ | $f'(x) = nx^{n-1}$ |
+| $f(x) = e^x$ | $f'(x) = e^x$ |
+| $f(x) = \ln x$ | $f'(x) = 1/x$ |
+| $f(x) = \sin x$ | $f'(x) = \cos x$ |
+| $f(x) = \cos x$ | $f'(x) = -\sin x$ |
+
+### ML 中最重要的导数
+
+```python
+# Sigmoid 函数的导数 — 在二分类和 RNN 门控中常见
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+def sigmoid_derivative(x):
+    """σ'(x) = σ(x)(1 - σ(x)) — 优雅的导数形式"""
+    s = sigmoid(x)
+    return s * (1 - s)
+
+# 验证
+x_vals = np.array([-2, -1, 0, 1, 2])
+print("Sigmoid 导数:")
+for x in x_vals:
+    numerical = numerical_derivative(sigmoid, x)
+    theoretical = sigmoid_derivative(x)
+    print(f"  x = {x:2d}: σ'(x) = {theoretical:.4f} (数值: {numerical:.4f})")
+
+# 注意：在 x 远离 0 时导数接近 0 — 这就是梯度消失的根源！
+print(f"\nσ'(-5) ≈ {sigmoid_derivative(-5):.6f}  <- 几乎为 0，梯度消失！")
+print(f"σ'(5)  ≈ {sigmoid_derivative(5):.6f}  <- 几乎为 0，梯度消失！")
+```
+
+## 3. 偏导数 — 多变量函数的世界
+
+### 定义
+
+对于多变量函数 $f(x_1, x_2, \dots, x_n)$，偏导数 $\frac{\partial f}{\partial x_i}$ 表示**只改变 $x_i$，其他变量保持不变**时的变化率。
+
+**ML 意义**：模型有成千上万个参数。偏导数告诉我们：**"只改变这一个参数，其他都不动，损失会怎么变？"**
+
+```python
+# 二元函数
+def f(x, y):
+    return x**2 + y**2 + 2*x*y
+
+# 偏导数（数值计算）
+def partial_x(f, x, y, h=1e-5):
+    """∂f/∂x"""
+    return (f(x + h, y) - f(x - h, y)) / (2 * h)
+
+def partial_y(f, x, y, h=1e-5):
+    """∂f/∂y"""
+    return (f(x, y + h) - f(x, y - h)) / (2 * h)
+
+x0, y0 = 1, 2
+px = partial_x(f, x0, y0)
+py = partial_y(f, x0, y0)
+print(f"f(x,y) = x^2 + y^2 + 2xy")
+print(f"∂f/∂x 在 (1,2) = {px}")  # 2x + 2y = 2 + 4 = 6
+print(f"∂f/∂y 在 (1,2) = {py}")  # 2y + 2x = 4 + 2 = 6
+```
+
+### 混合偏导数
+
+对于"行为良好"的函数（ML 中绝大多数函数），混合偏导数与顺序无关：
+
+$$\frac{\partial^2 f}{\partial x \partial y} = \frac{\partial^2 f}{\partial y \partial x}$$
+
+```python
+# 验证混合偏导数的对称性（以 f = x^3 * y^2 为例）
+def g(x, y):
+    return x**3 * y**2
+
+# 先对 x 求偏导，再对 y 求偏导
+# 使用 lambda 捕获计算图：
+# g_x = 3x^2 * y^2
+# g_xy = 3x^2 * 2y = 6x^2 * y
+# 反过来: g_y = x^3 * 2y = 2x^3 * y
+# g_yx = 6x^2 * y (对 x 求导: 3x^2 * 2y)
+# 结果相同！
+x0, y0 = 2, 3
+print(f"∂²g/∂x∂y 在 (2,3): {6 * x0**2 * y0}")  # 72
+print(f"∂²g/∂y∂x 在 (2,3): {6 * x0**2 * y0}")  # 72
+```
+
+## 4. 梯度 — 方向最陡的上升
+
+### 定义
+
+梯度 $\nabla f$ 是包含所有偏导数的向量：
+
+$$\nabla f = \left( \frac{\partial f}{\partial x_1}, \frac{\partial f}{\partial x_2}, \ldots, \frac{\partial f}{\partial x_n} \right)$$
+
+**几何意义**：梯度指向函数值**增长最快**的方向（最陡上升方向）。
+
+**ML 意义**：因为我们要最小化损失，所以沿**负梯度方向**移动——这就是梯度下降：
+
+$$\mathbf{w}_{\text{new}} = \mathbf{w}_{\text{old}} - \eta \nabla L(\mathbf{w})$$
+
+```python
+def f_2d(point):
+    """二元函数: f(x,y) = x^2 + 2y^2"""
+    x, y = point
+    return x**2 + 2 * y**2
+
+def gradient_f_2d(point):
+    """梯度: ∇f = [2x, 4y]"""
+    x, y = point
+    return np.array([2*x, 4*y])
+
+# 在点 (3, 2) 处
+point = np.array([3.0, 2.0])
+g = gradient_f_2d(point)
+print(f"在点 {point}:")
+print(f"函数值 f = {f_2d(point)}")
+print(f"梯度 ∇f = {g}")  # [6, 8]
+print(f"负梯度方向 (下降): {-g}")  # [-6, -8]
+
+# 验证负梯度确实是下降方向
+step = 0.01
+new_point = point - step * g
+new_value = f_2d(new_point)
+old_value = f_2d(point)
+print(f"\n沿负梯度走一小步 (step={step}):")
+print(f"新点: {new_point}")
+print(f"旧值: {old_value:.4f} -> 新值: {new_value:.4f}")
+print(f"确实减小了: {new_value < old_value}")
+```
+
+### 可视化梯度场
+
+```python
+def f_contour(x, y):
+    return x**2 + 2*y**2
+
+# 创建一个二维网格
+x = np.linspace(-5, 5, 200)
+y = np.linspace(-5, 5, 200)
+X, Y = np.meshgrid(x, y)
+Z = f_contour(X, Y)
+
+# 在几个点上计算梯度
+pts = np.array([[-4, 3], [2, -3], [0, 4], [-2, -2], [3, 1]])
+print("各点的梯度向量 (指向增长最快的方向):")
+for pt in pts:
+    grad = gradient_f_2d(pt)
+    grad_dir = grad / np.linalg.norm(grad)
+    print(f"  点 {pt}: 梯度 = {np.round(grad, 1)}, "
+          f"方向 = {np.round(grad_dir, 2)}, "
+          f"坡度 = {np.linalg.norm(grad):.1f}")
+```
+
+## 5. 链式法则 — 反向传播的核心
+
+### 定义
+
+如果 $y = f(u)$ 且 $u = g(x)$，那么：
+
+$$\frac{dy}{dx} = \frac{dy}{du} \cdot \frac{du}{dx}$$
+
+对于多元函数：
+
+$$\frac{\partial L}{\partial w} = \frac{\partial L}{\partial y} \cdot \frac{\partial y}{\partial z} \cdot \frac{\partial z}{\partial w}$$
+
+**这就是反向传播的全部数学基础！**
+
+### 链式法则在神经网络中
+
+考虑一个最简单的两层网络：
+
+$$\begin{aligned}
+z &= w_1 x + b_1 \\
+a &= \text{ReLU}(z) \\
+y &= w_2 a + b_2 \\
+L &= (y - y_{\text{true}})^2
+\end{aligned}$$
+
+要计算 $\frac{\partial L}{\partial w_1}$（用于更新第一层权重）：
+
+$$\frac{\partial L}{\partial w_1} = \frac{\partial L}{\partial y} \cdot \frac{\partial y}{\partial a} \cdot \frac{\partial a}{\partial z} \cdot \frac{\partial z}{\partial w_1}$$
+
+链式法则将这个复杂梯度拆解成 4 个简单的局部导数的乘积。
+
+### 手动实现反向传播
+
+```python
+def manual_backprop(x, w1, b1, w2, b2, y_true):
+    """
+    一个简单的两层网络：x -> Linear -> ReLU -> Linear -> MSE Loss
+    手动计算所有梯度，展示链式法则的每一步。
+    """
+    # --- 前向传播 (Forward Pass) ---
+    z1 = w1 * x + b1             # Linear 1
+    a1 = max(0, z1)              # ReLU
+    y_pred = w2 * a1 + b2        # Linear 2
+    loss = (y_pred - y_true) ** 2  # MSE Loss
+    
+    # --- 反向传播 (Backward Pass) ---
+    # 第 4 步: ∂L/∂y_pred
+    dL_dy = 2 * (y_pred - y_true)
+    
+    # 第 3 步: ∂y_pred/∂a1 = w2, ∂y_pred/∂w2 = a1, ∂y_pred/∂b2 = 1
+    dL_dw2 = dL_dy * a1
+    dL_db2 = dL_dy * 1
+    dL_da1 = dL_dy * w2
+    
+    # 第 2 步: ∂a1/∂z1 = 1 if z1 > 0 else 0 (ReLU 导数)
+    dL_dz1 = dL_da1 * (1 if z1 > 0 else 0)
+    
+    # 第 1 步: ∂z1/∂w1 = x, ∂z1/∂b1 = 1
+    dL_dw1 = dL_dz1 * x
+    dL_db1 = dL_dz1 * 1
+    
+    return {
+        "forward": {"z1": z1, "a1": a1, "y_pred": y_pred, "loss": loss},
+        "gradients": {
+            "dL/dw1": dL_dw1, "dL/db1": dL_db1,
+            "dL/dw2": dL_dw2, "dL/db2": dL_db2,
+        }
+    }
+
+# 测试
+x = 2.0
+w1, b1 = 0.5, 0.1
+w2, b2 = 0.3, -0.2
+y_true = 1.0
+
+result = manual_backprop(x, w1, b1, w2, b2, y_true)
+
+print("=== 前向传播 ===")
+for name, val in result["forward"].items():
+    print(f"  {name}: {val:.4f}")
+
+print("\n=== 梯度 (梯度下降时用这些更新参数) ===")
+for name, val in result["gradients"].items():
+    print(f"  {name}: {val:.4f}")
+
+# 梯度更新示范
+lr = 0.01
+print(f"\n=== 参数更新 (学习率={lr}) ===")
+print(f"  w1: {w1:.4f} -> {w1 - lr * result['gradients']['dL/dw1']:.4f}")
+print(f"  b1: {b1:.4f} -> {b1 - lr * result['gradients']['dL/db1']:.4f}")
+print(f"  w2: {w2:.4f} -> {w2 - lr * result['gradients']['dL/dw2']:.4f}")
+print(f"  b2: {b2:.4f} -> {b2 - lr * result['gradients']['dL/db2']:.4f}")
+```
+
+## 6. 梯度下降 — 迭代优化的艺术
+
+### 核心思想
+
+梯度下降是最简单也是最基础的优化算法：
+
+1. 从某个初始参数值开始
+2. 计算当前点的梯度（指向上升方向）
+3. 沿**负梯度**方向走一小步（步长 = 学习率）
+4. 重复直到收敛
+
+$$\mathbf{w}^{(t+1)} = \mathbf{w}^{(t)} - \eta \nabla L(\mathbf{w}^{(t)})$$
+
+### 一维梯度下降可视化
+
+```python
+def gradient_descent_1d(grad_fn, init_x, lr, n_iter):
+    """
+    一维梯度下降。
+    
+    参数:
+        grad_fn: 梯度函数 f'(x)
+        init_x: 初始值
+        lr: 学习率
+        n_iter: 迭代次数
+    """
+    x = init_x
+    history = [x]
+    
+    for i in range(n_iter):
+        grad = grad_fn(x)
+        x = x - lr * grad
+        history.append(x)
+    
+    return np.array(history)
+
+# 找一个简单函数的最小值: f(x) = x^2 (最小值在 x=0)
+def f_simple(x):
+    return x**2
+
+def grad_f_simple(x):
+    return 2 * x
+
+# 从 x=5 开始梯度下降
+history = gradient_descent_1d(
+    grad_fn=grad_f_simple,
+    init_x=5.0,
+    lr=0.1,
+    n_iter=30
+)
+
+print("一维梯度下降: f(x) = x^2, 从 x=5 开始")
+print(f"初始值: {history[0]}")
+print(f"最终值: {history[-1]:.6f}")
+print(f"迭代次数: {len(history) - 1}")
+print(f"\n前 10 步:")
+for i, x in enumerate(history[:10]):
+    print(f"  迭代 {i}: x = {x:.4f}, f(x) = {x**2:.4f}")
+```
+
+### 学习率的影响 — ML 训练中最关键的调参
+
+学习率 $\eta$ 是最重要的超参数。太大会震荡/发散，太小会收敛极慢。
+
+```python
+def run_gd_1d(init_x, lr, n_iter=20):
+    """运行梯度下降并返回轨迹"""
+    x = init_x
+    history = [x]
+    for _ in range(n_iter):
+        x = x - lr * 2 * x  # f'(x) = 2x
+        history.append(x)
+    return history
+
+init_x = 5.0
+
+print("学习率比较 — f(x) = x^2")
+print("-" * 60)
+for lr in [0.01, 0.1, 0.5, 0.9, 1.01]:
+    history = run_gd_1d(init_x, lr, n_iter=15)
+    final = history[-1]
+    status = ""
+    if abs(final) < 1e-3:
+        status = "✓ 收敛"
+    elif abs(final) < 1:
+        status = "~ 缓慢收敛中"
+    elif abs(final) < abs(init_x):
+        status = "Δ 震荡但接近"
+    else:
+        status = "✗ 发散！"
+    print(f"  lr={lr:.2f}: 最终 x = {final:+.4f}, {status}")
+```
+
+## 7. 凸函数 vs 非凸函数
+
+### 什么是凸函数？
+
+凸函数的任意两点连线都在函数图像上方。数学上：
+
+$$f(tx_1 + (1-t)x_2) \leq tf(x_1) + (1-t)f(x_2), \quad \forall t \in [0, 1]$$
+
+**ML 意义**：
+- **凸损失函数**（如 MSE、交叉熵对线性模型）保证梯度下降能找到全局最优
+- **非凸损失函数**（如深度神经网络的损失面）梯度下降可能卡在局部最优或鞍点
+- 实践中，深度学习虽然理论上"非凸"，但经验表明局部最优往往足够好
+
+```python
+# 凸函数 vs 非凸函数
+def convex_func(x):
+    """凸函数: x^2"""
+    return x**2
+
+def non_convex_func(x):
+    """非凸函数: 有多个局部最小值"""
+    return x**4 - 4*x**2 + 0.5*x
+
+# 测试凸性条件
+x_vals = np.linspace(-3, 3, 1000)
+print("凸函数 x^2 的二阶导数 = 2 > 0 (恒为正，说明是凸的)")
+print("非凸函数 x^4-4x^2+0.5x 的二阶导数 = 12x^2-8")
+print("  当 |x| < sqrt(2/3) ≈ 0.816 时二阶导数为负 → 非凸")
+```
+
+### 梯度下降在非凸表面上的行为
+
+```python
+def non_convex_1d(x):
+    return x**4 - 4*x**2 + 0.5*x
+
+def grad_non_convex_1d(x):
+    return 4*x**3 - 8*x + 0.5
+
+# 从不同初始点开始梯度下降 — 会收敛到不同的局部最小值！
+test_starts = [-2.5, -0.5, 0.5, 2.5]
+print("非凸函数上的梯度下降 — 不同起点导致不同终点")
+print(f"函数 f(x) = x^4 - 4x^2 + 0.5x")
+print("-" * 50)
+
+for start in test_starts:
+    x = start
+    for i in range(50):
+        x = x - 0.01 * grad_non_convex_1d(x)
+    print(f"  起始点 x={start:+.1f} -> 收敛到 x={x:+.4f}, f(x)={non_convex_1d(x):+.4f}")
+```
+
+## 8. 梯度下降的可视化演示
+
+```python
+def gradient_descent_2d(grad_fn, init, lr, n_iter):
+    """二维梯度下降"""
+    x = np.array(init, dtype=float)
+    history = [x.copy()]
+    
+    for _ in range(n_iter):
+        grad = grad_fn(x)
+        x = x - lr * grad
+        history.append(x.copy())
+    
+    return np.array(history)
+
+# 二维二次函数: f(x,y) = x^2 + 2y^2
+# 梯度: ∇f = [2x, 4y]
+# 最小值在 (0, 0)
+
+def grad_2d(point):
+    return np.array([2*point[0], 4*point[1]])
+
+# 运行梯度下降
+init = np.array([4.0, 3.0])
+lr = 0.1
+n_iter = 20
+
+history = gradient_descent_2d(grad_2d, init, lr, n_iter)
+
+print("二维梯度下降: f(x,y) = x^2 + 2y^2")
+print(f"起点: ({history[0][0]:.1f}, {history[0][1]:.1f})")
+print(f"终点: ({history[-1][0]:.4f}, {history[-1][1]:.4f})")
+print(f"\n迭代轨迹 (每隔 2 步):")
+for i in range(0, len(history), 2):
+    x, y = history[i]
+    loss = x**2 + 2*y**2
+    print(f"  步 {i:2d}: ({x:+.3f}, {y:+.3f}), f = {loss:.4f}")
+```
+
+## 总结
+
+微积分和优化是理解 ML 训练过程的必备知识：
+
+1. **导数** 衡量"参数小变化导致的损失变化"——优化的方向来自导数。
+
+2. **梯度** 是多变量函数的"最陡上升"方向向量。将所有偏导数组合在一起，得到完整的优化方向。**负梯度方向**就是参数更新方向。
+
+3. **链式法则** 是反向传播的核心。复杂的神经网络梯度被分解为层层之间的局部导数相乘——每一层只需要知道自己"局部"的导数规则。
+
+4. **梯度下降** 是 ML 优化的起点：参数沿负梯度方向迭代更新。学习率是最关键的调参——太大震荡，太小太慢。
+
+5. **凸 vs 非凸**：虽然深度学习的损失面是非凸的（有无数局部最优和鞍点），但在实践中，SGD 配合良好的初始化和学习率调度，通常能找到优秀的解。
+
+6. **动手建议**：用纸笔推导一个简单神经网络（2 层，MSE 损失）的梯度公式。体会链式法则如何将问题分解——这比读任何教程都有效。
+
+---
+
+下一节：[概率与统计](/lesson/probability-statistics) — 理解数据的不确定性和模型输出的概率含义。

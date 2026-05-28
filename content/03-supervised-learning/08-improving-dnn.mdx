@@ -1,0 +1,598 @@
+---
+title: "深度神经网络：改进与正则化"
+description: "提升 DNN 性能的核心技术：BatchNorm、Dropout、权重初始化、残差连接与早停法"
+part: "03-supervised-learning"
+order: 8
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "理解 Batch Normalization 的原理及 train/eval 模式差异"
+  - "掌握 Dropout 的机制与推理时的缩放"
+  - "了解 Xavier 与 Kaiming 权重初始化的数学动机"
+  - "理解残差连接如何缓解梯度消失"
+  - "学会使用早停、数据增强等正则化策略"
+  - "构建一个集所有技巧于一体的正则化 DNN"
+prerequisites: ["dnn-architecture", "training-dnn", "linear-algebra"]
+keywords: ["batch-normalization", "dropout", "weight-initialization", "residual-connections", "regularization"]
+---
+
+# 一、Batch Normalization（批归一化）
+
+## 动机：Internal Covariate Shift
+
+在训练过程中，各层的输入分布会随着前层参数更新而不断变化，这种现象称为**内部协变量偏移（Internal Covariate Shift）**。这导致：
+- 需要更低的学习率，训练变慢
+- 对参数初始化更加敏感
+- 深层网络的梯度容易消失或爆炸
+
+## BatchNorm 做了什么
+
+对于一个 mini-batch $\mathcal{B} = \{\mathbf{x}_1, \ldots, \mathbf{x}_m\}$，对每个特征维度独立地进行归一化：
+
+$$\begin{aligned}
+\mu_{\mathcal{B}} &= \frac{1}{m} \sum_{i=1}^{m} \mathbf{x}_i \quad &\text{(batch 均值)} \\
+\sigma_{\mathcal{B}}^2 &= \frac{1}{m} \sum_{i=1}^{m} (\mathbf{x}_i - \mu_{\mathcal{B}})^2 \quad &\text{(batch 方差)} \\
+\hat{\mathbf{x}}_i &= \frac{\mathbf{x}_i - \mu_{\mathcal{B}}}{\sqrt{\sigma_{\mathcal{B}}^2 + \epsilon}} \quad &\text{(标准化)} \\
+\mathbf{y}_i &= \gamma \hat{\mathbf{x}}_i + \beta \quad &\text{(缩放和平移)}
+\end{aligned}$$
+
+最后一步的 $\gamma$ 和 $\beta$ 是**可学习的参数**，让网络可以恢复原始的表示能力（如果这是最优的）。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_moons, make_circles
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+torch.manual_seed(42)
+
+# 准备数据
+X, y = make_circles(n_samples=2000, noise=0.1, factor=0.5, random_state=42)
+X = StandardScaler().fit_transform(X)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42)
+
+X_train_t = torch.tensor(X_train, dtype=torch.float32)
+X_test_t = torch.tensor(X_test, dtype=torch.float32)
+y_train_t = torch.tensor(y_train, dtype=torch.long)
+y_test_t = torch.tensor(y_test, dtype=torch.long)
+```
+
+## PyTorch 中的 BatchNorm
+
+```python
+class MLPWithBatchNorm(nn.Module):
+    def __init__(self, input_dim, hidden_dims, output_dim):
+        super().__init__()
+        layers = []
+        prev_dim = input_dim
+        for hdim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hdim))
+            layers.append(nn.BatchNorm1d(hdim))  # 在激活函数之前应用
+            layers.append(nn.ReLU())
+            prev_dim = hdim
+        layers.append(nn.Linear(prev_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+model_bn = MLPWithBatchNorm(2, [128, 128, 128], 2)
+print("网络结构（含 BatchNorm）:")
+print(model_bn)
+```
+
+## BatchNorm 的 train/eval 模式问题
+
+**这是最常见的 Bug 来源之一！** 在训练模式下，BatchNorm 使用当前 mini-batch 的均值和方差。在评估（推理）模式下，BatchNorm 应使用训练期间累积的**全局均值和方差**（running mean / running variance）。
+
+```python
+# 演示 train/eval 模式差异
+bn = nn.BatchNorm1d(10)
+bn.eval()  # eval 模式
+# 初始 running_mean 为 0, running_var 为 1（默认）
+x_test = torch.randn(4, 10) * 5.0 + 3.0  # 来自不同分布的输入
+
+# 设定训练好的 running stats（模拟训练后的状态）
+bn.running_mean.data = torch.ones(10) * 3.0
+bn.running_var.data = torch.ones(10) * 25.0
+
+with torch.no_grad():
+    out_eval = bn(x_test)  # eval 模式：使用 running_mean/running_var
+
+bn.train()  # 切回 train 模式
+with torch.no_grad():
+    out_train = bn(x_test)  # train 模式：使用当前 batch 的均值/方差
+
+print("Train mode 输出（使用 batch stats）:\n", out_train[:2])
+print("Eval mode 输出（使用 running stats）:\n", out_eval[:2])
+print("两者不同！训练和评估必须正确切换模式。")
+```
+
+**最佳实践**：
+- 训练循环开始调用 `model.train()`
+- 评估/推理前调用 `model.eval()`
+- 推理时包在 `torch.no_grad()` 中
+
+## BatchNorm 的好处
+
+- 允许使用更大的学习率，加速训练
+- 降低对初始化的敏感度
+- 有一定的正则化效果（batch 的随机性引入噪声）
+- 缓解梯度消失/爆炸，使得极深的网络可训练
+
+# 二、Layer Normalization
+
+BatchNorm 在 batch 维度上归一化，对于 batch size 小（如 batch_size=1 或 2）或有循环依赖的场景（RNN/Transformer）效果不佳。**Layer Normalization** 在特征维度上归一化，不依赖 batch。
+
+$$\mu_{\text{layer}} = \frac{1}{d} \sum_{j=1}^{d} x_j, \quad \sigma_{\text{layer}}^2 = \frac{1}{d} \sum_{j=1}^{d} (x_j - \mu_{\text{layer}})^2$$
+
+```python
+# BatchNorm vs LayerNorm 对比
+batch_size, features = 4, 6
+
+x = torch.randn(batch_size, features)
+
+bn = nn.BatchNorm1d(features)
+ln = nn.LayerNorm(features)
+
+bn_out = bn(x)
+ln_out = ln(x)
+
+print(f"BatchNorm:  对每个特征的 {batch_size} 个样本归一化")
+print(f"LayerNorm:  对每个样本的 {features} 个特征归一化")
+print(f"BatchNorm 每列均值: {bn_out.mean(dim=0).detach().round(decimals=4)}")
+print(f"LayerNorm 每行均值:  {ln_out.mean(dim=1).detach().round(decimals=4)}")
+```
+
+| 归一化类型 | 归一化维度 | 适用场景 |
+|-----------|-----------|----------|
+| BatchNorm | 跨 batch | CNN、MLP（batch size >= 16） |
+| LayerNorm | 跨特征 | Transformer、RNN、小 batch |
+| InstanceNorm | 跨空间 | 风格迁移 |
+| GroupNorm | 跨通道组 | 小 batch 的 CNN |
+
+# 三、Dropout
+
+Dropout 在训练时随机"关掉"一部分神经元（将其输出置为 0），防止神经元之间形成过于复杂的共适应（co-adaptation）。
+
+```python
+class MLPWithDropout(nn.Module):
+    def __init__(self, input_dim, hidden_dims, output_dim, dropout=0.5):
+        super().__init__()
+        layers = []
+        prev_dim = input_dim
+        for hdim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hdim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))  # 训练时随机失活
+            prev_dim = hdim
+        layers.append(nn.Linear(prev_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+# 演示 Dropout 的 train/eval 差异
+dropout = nn.Dropout(p=0.5)
+x = torch.ones(10)
+
+dropout.train()
+out_train = dropout(x)
+print(f"Train mode: {out_train}")        # 大约一半为 0，一半为 2
+print(f"  存活神经元数: {(out_train > 0).sum().item()}")
+
+dropout.eval()
+out_eval = dropout(x)
+print(f"Eval mode:   {out_eval}")          # 全部为 1（不变）
+```
+
+## Dropout 的缩放机制
+
+Dropout 不需要在推理时手动缩放。PyTorch 的实现在训练时按 $\frac{1}{1-p}$ 缩放输出，使得期望值保持不变：
+
+$$E[\text{Dropout}(\mathbf{x})] = \mathbf{x}$$
+
+```python
+# 验证期望不变
+dropout = nn.Dropout(p=0.5)
+x = torch.ones(10000)
+dropout.train()
+out = dropout(x)
+print(f"训练模式下的均值: {out.mean().item():.4f} (期望为 1.0)")
+print(f"被置 0 的比例: {(out == 0).float().mean().item():.2f} (期望为 0.5)")
+```
+
+**Dropout 速率选择**：
+- 隐藏层：$p = 0.5$（最常见的设置）
+- 输入层：$p = 0.1 \sim 0.2$（不太希望对原始输入做太多 dropout）
+- 对小的网络使用较小的 $p$ 或无 Dropout
+
+# 四、权重初始化
+
+好的初始化对于训练深层网络至关重要。坏初始化可能导致梯度消失或爆炸。
+
+## Xavier / Glorot 初始化
+
+适用于 Sigmoid / Tanh 激活函数。从一个均匀分布中采样：
+
+$$\mathbf{W} \sim \mathcal{U}\left(-\sqrt{\frac{6}{n_{\text{in}} + n_{\text{out}}}}, \sqrt{\frac{6}{n_{\text{in}} + n_{\text{out}}}}\right)$$
+
+或正态分布：$\mathcal{N}(0, \frac{2}{n_{\text{in}} + n_{\text{out}}})$
+
+目的是保持**前向和反向传播中每一层输出的方差一致**。
+
+## Kaiming / He 初始化
+
+适用于 ReLU 及其变体。因为 ReLU 将一半的输入置零，方差减半，所以需要补偿：
+
+$$\mathbf{W} \sim \mathcal{N}\left(0, \frac{2}{n_{\text{in}}}\right)$$
+
+```python
+# PyTorch 默认的初始化策略
+# nn.Linear 默认使用 Kaiming 均匀初始化
+# nn.Conv2d 默认使用 Kaiming 均匀初始化
+
+def init_weights(module):
+    """自定义权重初始化函数"""
+    if isinstance(module, nn.Linear):
+        # Xavier 初始化（适合 Tanh）
+        # nn.init.xavier_normal_(module.weight)
+        # nn.init.xavier_uniform_(module.weight)
+
+        # Kaiming 初始化（适合 ReLU）
+        nn.init.kaiming_normal_(module.weight, mode='fan_in', nonlinearity='relu')
+        # nn.init.kaiming_uniform_(module.weight, mode='fan_in', nonlinearity='relu')
+
+        if module.bias is not None:
+            nn.init.constant_(module.bias, 0)  # 偏置通常初始化为 0
+
+# 应用到模型
+model = MLPWithBatchNorm(2, [128, 128, 128], 2)
+model.apply(init_weights)
+```
+
+## 验证初始化效果
+
+```python
+def check_activation_stats(model, input_dim, batch_size=512):
+    """检查每层激活值的均值和标准差（用于诊断初始化问题）"""
+    model.eval()
+    x = torch.randn(batch_size, input_dim)
+    activations = {}
+    hooks = []
+
+    def hook_fn(name):
+        def fn(module, input, output):
+            activations[name] = {
+                'mean': output.mean().item(),
+                'std': output.std().item(),
+                'min': output.min().item(),
+                'max': output.max().item(),
+            }
+        return fn
+
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.ReLU, nn.Tanh, nn.Sigmoid, nn.Linear)):
+            h = module.register_forward_hook(hook_fn(name))
+            hooks.append(h)
+
+    with torch.no_grad():
+        model(x)
+
+    # 清理 hooks
+    for h in hooks:
+        h.remove()
+
+    print(f"\n{'Layer':<30} {'Mean':>10} {'Std':>10} {'Min':>10} {'Max':>10}")
+    print("-" * 70)
+    for name, stats in activations.items():
+        print(f"{name:<30} {stats['mean']:>10.4f} {stats['std']:>10.4f} "
+              f"{stats['min']:>10.4f} {stats['max']:>10.4f}")
+    # 好的初始化：std 保持在合理范围（如 0.5~2.0），不会接近 0 或极大
+
+# 好的初始化（Kaiming）
+model_good = nn.Sequential(
+    nn.Linear(2, 128), nn.ReLU(),
+    nn.Linear(128, 128), nn.ReLU(),
+    nn.Linear(128, 2),
+)
+model_good.apply(init_weights)
+print("=== 良好初始化 ===")
+check_activation_stats(model_good, 2)
+```
+
+# 五、残差连接（Skip Connections）
+
+随着网络加深，梯度在反向传播中不断衰减（梯度消失），导致浅层几乎无法被训练。残差连接通过跳跃连接直接传递信息：
+
+$$\mathbf{h}^{(\ell+1)} = \mathcal{F}(\mathbf{h}^{(\ell)}) + \mathbf{h}^{(\ell)}$$
+
+其中 $\mathcal{F}$ 是一个或两个变换层（如 Linear + ReLU + Linear）。梯度可以通过跳跃连接"抄近路"，缓解梯度消失：
+
+$$\frac{\partial \mathcal{L}}{\partial \mathbf{h}^{(\ell)}} = \frac{\partial \mathcal{L}}{\partial \mathbf{h}^{(\ell+1)}} \cdot \left( \frac{\partial \mathcal{F}}{\partial \mathbf{h}^{(\ell)}} + \mathbf{I} \right)$$
+
+```python
+class ResidualBlock(nn.Module):
+    """残差块：输入和输出维度相同时使用"""
+    def __init__(self, dim, dropout=0.0):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.bn1 = nn.BatchNorm1d(dim)
+        self.fc2 = nn.Linear(dim, dim)
+        self.bn2 = nn.BatchNorm1d(dim)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+    def forward(self, x):
+        identity = x  # 保存输入（跳跃连接）
+        out = self.fc1(x)
+        out = self.bn1(out)
+        out = F.relu(out)
+        out = self.dropout(out)
+        out = self.fc2(out)
+        out = self.bn2(out)
+        out = out + identity  # 关键：跳跃连接
+        out = F.relu(out)
+        return out
+
+class ResMLP(nn.Module):
+    """带残差连接的深度 MLP"""
+    def __init__(self, input_dim, hidden_dim, num_blocks, output_dim, dropout=0.1):
+        super().__init__()
+        self.input_proj = nn.Linear(input_dim, hidden_dim)
+        self.blocks = nn.Sequential(
+            *[ResidualBlock(hidden_dim, dropout) for _ in range(num_blocks)]
+        )
+        self.output_proj = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        x = F.relu(self.input_proj(x))
+        x = self.blocks(x)
+        x = self.output_proj(x)
+        return x
+
+# 构建一个 10 个残差块的网络
+resnet = ResMLP(input_dim=2, hidden_dim=64, num_blocks=10, output_dim=2)
+print(f"ResMLP 参数量: {sum(p.numel() for p in resnet.parameters()):,}")
+
+# 对比：无残差的深层网络 vs 带残差的网络
+def compare_gradients():
+    """对比普通 MLP 和残差 MLP 的梯度范数"""
+    from torch.utils.data import DataLoader, TensorDataset
+
+    dataset = TensorDataset(X_train_t, y_train_t)
+    loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    X_batch, y_batch = next(iter(loader))
+
+    # 普通深层 MLP
+    plain_mlp = nn.Sequential(*[
+        layer for _ in range(8) for layer in [
+            nn.Linear(2, 64) if _ == 0 else nn.Linear(64, 64),
+            nn.ReLU()
+        ]
+    ][:2] + [nn.Linear(64, 64), nn.ReLU()] * 7 + [nn.Linear(64, 2)])
+
+    # 简化版本：构建深层 MLP 和残差网络
+    # 此处概念演示略
+
+    print("残差连接让梯度通过 +I 项直接传递到浅层，") 
+    print("有效解决了深层网络的梯度消失问题。")
+compare_gradients()
+```
+
+# 六、早停法（Early Stopping）
+
+早停法在验证集性能不再提升时停止训练，防止过拟合：
+
+```python
+class EarlyStopping:
+    def __init__(self, patience=20, min_delta=0.0, mode='min', save_best=True):
+        """
+        patience: 容忍多少个 epoch 不提升
+        min_delta: 最小提升阈值
+        mode: 'min' 用于 loss, 'max' 用于 accuracy
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.save_best = save_best
+        self.best_score = None
+        self.counter = 0
+        self.early_stop = False
+        self.best_state = None
+
+    def __call__(self, score, model):
+        if self.best_score is None:
+            self.best_score = score
+            self._save_checkpoint(model)
+            return False
+
+        improved = (score < self.best_score - self.min_delta) if self.mode == 'min' \
+              else (score > self.best_score + self.min_delta)
+
+        if improved:
+            self.best_score = score
+            self.counter = 0
+            self._save_checkpoint(model)
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        return self.early_stop
+
+    def _save_checkpoint(self, model):
+        if self.save_best:
+            self.best_state = {k: v.cpu().clone()
+                               for k, v in model.state_dict().items()}
+
+    def load_best(self, model):
+        if self.best_state is not None:
+            model.load_state_dict(self.best_state)
+```
+
+# 七、数据增强（Data Augmentation）
+
+对于表格数据，可以使用的增强技术包括：
+
+```python
+def tabular_augmentation(X, y, noise_std=0.05, mixup_alpha=0.2):
+    """
+    表格数据的简单增强
+    1. 加高斯噪声
+    2. Mixup
+    """
+    n = len(X)
+
+    # 1. 高斯噪声增强
+    X_noisy = X + torch.randn_like(X) * noise_std
+    augmented_X = [X, X_noisy]
+    augmented_y = [y, y]
+
+    # 2. Mixup: 随机混合两个样本
+    if mixup_alpha > 0:
+        indices = torch.randperm(n)
+        lam = np.random.beta(mixup_alpha, mixup_alpha, size=(n, 1))
+        lam = torch.tensor(lam, dtype=torch.float32)
+        X_mixed = lam * X + (1 - lam) * X[indices]
+        # Mixup 标签需要特殊处理（软标签），此处仅示意
+        augmented_X.append(X_mixed)
+        augmented_y.append(y)  # 简化，实际需要混合标签
+
+    return torch.cat(augmented_X), torch.cat(augmented_y)
+```
+
+# 八、综合示例：一个正则化的 DNN
+
+```python
+class RegularizedDNN(nn.Module):
+    """集成了 BatchNorm、Dropout 和残差连接的正则化 MLP"""
+    def __init__(self, input_dim, hidden_dim, num_blocks, output_dim,
+                 dropout=0.3):
+        super().__init__()
+        self.input_fc = nn.Linear(input_dim, hidden_dim)
+        self.input_bn = nn.BatchNorm1d(hidden_dim)
+
+        # 多个残差块
+        blocks = []
+        for _ in range(num_blocks):
+            blocks.append(ResidualBlock(hidden_dim, dropout=dropout))
+        self.blocks = nn.Sequential(*blocks)
+
+        self.output_fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        x = F.relu(self.input_bn(self.input_fc(x)))
+        x = self.blocks(x)
+        x = self.output_fc(x)
+        return x
+
+# ===== 完整训练 =====
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import accuracy_score
+
+# 数据
+train_dataset = TensorDataset(X_train_t, y_train_t)
+test_dataset = TensorDataset(X_test_t, y_test_t)
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+
+# 模型
+model = RegularizedDNN(input_dim=2, hidden_dim=64, num_blocks=4,
+                        output_dim=2, dropout=0.2)
+
+# 应用 Kaiming 初始化
+model.apply(init_weights)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=300)
+early_stopper = EarlyStopping(patience=40, mode='min')
+
+# 训练
+train_losses, val_losses, val_accs = [], [], []
+n_epochs = 300
+
+for epoch in range(n_epochs):
+    # Training
+    model.train()
+    epoch_loss = 0
+    for X_b, y_b in train_loader:
+        optimizer.zero_grad()
+        loss = criterion(model(X_b), y_b)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        epoch_loss += loss.item() * X_b.size(0)
+    train_losses.append(epoch_loss / len(train_dataset))
+
+    # Validation
+    model.eval()
+    val_loss, val_correct = 0, 0
+    with torch.no_grad():
+        for X_b, y_b in test_loader:
+            logits = model(X_b)
+            val_loss += criterion(logits, y_b).item() * X_b.size(0)
+            val_correct += logits.argmax(1).eq(y_b).sum().item()
+    val_losses.append(val_loss / len(test_dataset))
+    val_accs.append(val_correct / len(test_dataset))
+
+    scheduler.step()
+
+    if early_stopper(val_losses[-1], model):
+        print(f"早停在 Epoch {epoch+1}")
+        break
+
+    if epoch % 50 == 0:
+        print(f"Epoch {epoch+1:3d}: Train Loss={train_losses[-1]:.4f}, "
+              f"Val Loss={val_losses[-1]:.4f}, Val Acc={val_accs[-1]:.3f}")
+
+# 加载最佳模型
+early_stopper.load_best(model)
+
+# 最终评估
+model.eval()
+with torch.no_grad():
+    logits = model(X_test_t)
+    preds = logits.argmax(1).numpy()
+    acc = accuracy_score(y_test, preds)
+print(f"\n最终测试准确率: {acc:.4f}")
+
+# 可视化训练过程
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].plot(train_losses, label='Train Loss')
+axes[0].plot(val_losses, label='Val Loss')
+axes[0].axvline(x=np.argmin(val_losses), color='r', linestyle='--', alpha=0.7,
+                label=f'Best (epoch {np.argmin(val_losses)+1})')
+axes[0].set_xlabel('Epoch'); axes[0].set_ylabel('Loss')
+axes[0].set_title('Training & Validation Loss')
+axes[0].legend(); axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(val_accs, 'g-', label='Val Accuracy')
+axes[1].axhline(y=max(val_accs), color='r', linestyle='--', alpha=0.7,
+                label=f'Best Acc: {max(val_accs):.3f}')
+axes[1].set_xlabel('Epoch'); axes[1].set_ylabel('Accuracy')
+axes[1].set_title('Validation Accuracy')
+axes[1].legend(); axes[1].grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+## 总结：改善 DNN 性能的技术汇总
+
+| 技术 | 解决的问题 | 关键要点 |
+|------|-----------|----------|
+| BatchNorm | 内部协变量偏移，梯度不稳定 | train/eval 模式必须正确切换 |
+| LayerNorm | BatchNorm 在小 batch / RNN / Transformer 中失效 | 跨特征归一化，不依赖 batch |
+| Dropout | 神经元共适应，过拟合 | train 时随机失活并缩放，eval 时不变 |
+| Xavier 初始化 | Sigmoid/Tanh 下的梯度消失 | 保持方差一致 |
+| Kaiming 初始化 | ReLU 下的梯度消失 | 考虑 ReLU 的整流效应 |
+| 残差连接 | 深层网络的梯度消失 | 跳跃连接保证梯度通路 |
+| 早停 | 过拟合 | 监控验证指标，设置 patience |
+| 数据增强 | 数据不足导致的过拟合 | 增强数据多样性 |
+
+在实际项目中，这些技术通常**组合使用**。一个典型的现代 MLP 配置是：Kaiming 初始化 + BatchNorm + ReLU + Dropout(0.2~0.5) + AdamW + CosineAnnealingLR + 早停。对于非常深的网络，再加上残差连接。

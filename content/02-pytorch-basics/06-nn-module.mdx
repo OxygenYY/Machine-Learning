@@ -1,0 +1,626 @@
+---
+title: "神经网络模块（nn.Module）"
+description: "掌握 PyTorch 构建神经网络的核心类 nn.Module，学会定义网络结构、管理参数以及保存和加载模型"
+part: "02-pytorch-basics"
+order: 6
+difficulty: "beginner"
+estimatedMinutes: 40
+objectives:
+  - "理解 nn.Module 的设计理念和核心方法"
+  - "掌握定义自定义网络结构的标准模式"
+  - "熟练使用内置层 nn.Linear, nn.Conv2d, nn.BatchNorm2d, nn.Dropout"
+  - "理解 nn.Parameter 与普通张量的区别"
+  - "学会保存和加载模型"
+  - "能够构建一个完整的 MLP 用于 MNIST 分类"
+prerequisites: ["python-basics", "numpy-fundamentals", "pytorch-tensors", "pytorch-autograd"]
+keywords: ["nn.Module", "神经网络", "全连接层", "卷积层", "参数管理", "模型保存"]
+---
+
+## nn.Module：一切网络的基类
+
+`nn.Module` 是 PyTorch 中所有神经网络模块的基类。你创建的每一个模型、每一层都应该继承自它。
+
+### 为什么需要 nn.Module？
+
+- **参数管理**：自动跟踪所有可学习参数
+- **设备管理**：`.to(device)` 一次调用移动所有参数
+- **序列化**：`.state_dict()` 方便保存和加载
+- **模块组合**：可以嵌套，构建复杂的层次结构
+- **钩子机制**：支持注册前向/反向钩子进行调试
+
+```python
+import torch
+import torch.nn as nn
+
+# nn.Module 是所有神经网络模块的基类
+print(f"nn.Linear 是 nn.Module 的子类: {issubclass(nn.Linear, nn.Module)}")
+print(f"nn.Conv2d 是 nn.Module 的子类: {issubclass(nn.Conv2d, nn.Module)}")
+print(f"nn.BatchNorm2d 是 nn.Module 的子类: {issubclass(nn.BatchNorm2d, nn.Module)}")
+```
+
+### 最基本的自定义 Module
+
+```python
+import torch
+import torch.nn as nn
+
+class MyFirstModule(nn.Module):
+    """
+    最简单的自定义 Module 模板
+    """
+
+    def __init__(self, input_size, hidden_size, output_size):
+        # 步骤1：必须调用父类的 __init__
+        super().__init__()
+
+        # 步骤2：定义网络层（作为类的属性）
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+
+        # 步骤3：（可选）初始化权重
+        self._init_weights()
+
+    def _init_weights(self):
+        """自定义权重初始化"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, x):
+        """
+        步骤4：定义前向传播逻辑
+        这是唯一需要实现的方法
+        """
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
+
+# 实例化模型
+model = MyFirstModule(input_size=784, hidden_size=256, output_size=10)
+print(model)
+
+# 测试前向传播
+x = torch.randn(4, 784)  # batch_size=4
+output = model(x)
+print(f"\n输入形状: {x.shape}")
+print(f"输出形状: {output.shape}")
+```
+
+## 内置神经网络层
+
+PyTorch 提供了丰富的预定义层，覆盖了绝大多数深度学习场景。
+
+### nn.Linear：全连接层
+
+```python
+import torch
+import torch.nn as nn
+
+# y = x @ W^T + b
+# 输入 (N, *, in_features) -> 输出 (N, *, out_features)
+
+linear = nn.Linear(in_features=10, out_features=5)
+print(f"全连接层: {linear}")
+print(f"权重形状: {linear.weight.shape}")  # (5, 10)
+print(f"偏置形状: {linear.bias.shape}")    # (5,)
+print(f"权重是否需要梯度: {linear.weight.requires_grad}")
+print(f"偏置是否需要梯度: {linear.bias.requires_grad}")
+
+# 不使用偏置
+linear_no_bias = nn.Linear(10, 5, bias=False)
+print(f"\n无偏置 Linear: bias={linear_no_bias.bias}")
+
+# 前向传播
+x = torch.randn(3, 10)  # batch_size=3, features=10
+y = linear(x)
+print(f"\n输入: {x.shape} -> 输出: {y.shape}")  # (3, 5)
+
+# 验证：y = x @ W^T + b
+y_manual = x @ linear.weight.T + linear.bias
+print(f"手动计算与层输出一致: {torch.allclose(y, y_manual)}")
+```
+
+### nn.Conv2d：二维卷积层
+
+```python
+import torch
+import torch.nn as nn
+
+# Conv2d 参数：
+# in_channels:  输入通道数
+# out_channels: 输出通道数（卷积核数量）
+# kernel_size:  卷积核大小
+# stride:       步长（默认1）
+# padding:      填充（默认0）
+
+# 创建一个卷积层
+conv = nn.Conv2d(
+    in_channels=3,        # RGB 图像，3 个通道
+    out_channels=16,      # 16 个卷积核
+    kernel_size=3,        # 3x3 卷积核
+    stride=1,
+    padding=1             # 保持空间尺寸不变
+)
+
+print(f"卷积层: {conv}")
+print(f"权重形状: {conv.weight.shape}")  # (16, 3, 3, 3)
+print(f"偏置形状: {conv.bias.shape}")    # (16,)
+
+# 输入：一批图像 (batch, channels, height, width)
+x = torch.randn(8, 3, 32, 32)  # 8 张 32x32 RGB 图片
+y = conv(x)
+
+# 输出尺寸：H_out = (H_in + 2*P - K) / S + 1
+#           = (32 + 2*1 - 3) / 1 + 1 = 32
+print(f"\n输入形状: {x.shape}")
+print(f"输出形状: {y.shape}")  # (8, 16, 32, 32)
+
+# 不同的卷积核大小和步长
+conv_large = nn.Conv2d(3, 16, kernel_size=5, stride=2, padding=2)
+y2 = conv_large(x)
+# 输出：H_out = (32 + 2*2 - 5) / 2 + 1 = 16.5 -> 16
+print(f"5x5 kernel, stride=2: {y2.shape}")  # (8, 16, 16, 16)
+```
+
+### nn.BatchNorm2d 和 nn.Dropout
+
+```python
+import torch
+import torch.nn as nn
+
+# === Batch Normalization ===
+# 对每个通道进行标准化，加速训练，稳定收敛
+x = torch.randn(4, 16, 32, 32)
+
+bn = nn.BatchNorm2d(num_features=16)  # 16 个通道
+print(f"BatchNorm2d: {bn}")
+print(f"gamma (可学习缩放): {bn.weight.shape}")  # (16,)
+print(f"beta (可学习偏移):  {bn.bias.shape}")     # (16,)
+
+y_bn = bn(x)
+print(f"BN 输出形状: {y_bn.shape}")  # (4, 16, 32, 32)
+
+# 训练 vs 评估模式下的 BN 行为不同
+bn.train()  # 训练模式：使用 batch 统计量
+bn.eval()   # 评估模式：使用运行时统计量（running_mean, running_var）
+
+# === Dropout ===
+# 随机将一部分神经元置零，防止过拟合
+dropout = nn.Dropout(p=0.5)  # 50% 的概率置零
+
+x = torch.ones(10, 20)
+print(f"\nDropout 前:\n{x[0, :10]}")
+
+# 训练模式：随机置零
+dropout.train()
+y_train = dropout(x)
+print(f"训练模式 (p=0.5) 后:\n{y_train[0, :10]}")
+print(f"非零元素比例: {(y_train != 0).float().mean().item():.2f}")
+
+# 评估模式：不做任何改变
+dropout.eval()
+y_eval = dropout(x)
+print(f"\n评估模式: 与输入相同的比例: {(y_eval == x).float().mean().item():.2f}")
+```
+
+### 激活函数
+
+```python
+import torch
+import torch.nn as nn
+
+x = torch.randn(2, 3)
+print(f"输入:\n{x}\n")
+
+# 各种常用激活函数
+activations = {
+    "ReLU":     nn.ReLU(),
+    "LeakyReLU": nn.LeakyReLU(negative_slope=0.01),
+    "Sigmoid":  nn.Sigmoid(),
+    "Tanh":     nn.Tanh(),
+    "GELU":     nn.GELU(),
+    "SiLU/Swish": nn.SiLU(),
+    "Softmax(dim=1)": nn.Softmax(dim=1),
+}
+
+for name, activation in activations.items():
+    output = activation(x)
+    print(f"{name:>16}: {output[0].detach().numpy()}")
+
+# 注意：激活函数也可以用 torch 函数形式调用
+relu_output1 = nn.ReLU()(x)   # 模块形式
+relu_output2 = torch.relu(x)   # 函数形式
+print(f"\n模块形式与函数形式等价: {torch.allclose(relu_output1, relu_output2)}")
+```
+
+## nn.Sequential：堆叠层
+
+对于简单的、顺序执行的网络，`nn.Sequential` 提供了一种更简洁的定义方式。
+
+```python
+import torch
+import torch.nn as nn
+
+# === 方法1：在 __init__ 中使用 nn.Sequential ===
+class SimpleSequentialModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(784, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 10),
+        )
+
+    def forward(self, x):
+        return self.features(x)
+
+# === 方法2：使用 OrderedDict 给每层命名 ===
+from collections import OrderedDict
+
+model_named = nn.Sequential(OrderedDict([
+    ("fc1", nn.Linear(784, 512)),
+    ("relu1", nn.ReLU()),
+    ("dropout1", nn.Dropout(0.3)),
+    ("fc2", nn.Linear(512, 256)),
+    ("relu2", nn.ReLU()),
+    ("fc3", nn.Linear(256, 10)),
+]))
+
+print(model_named)
+# 可以通过名称访问子模块
+print(f"\n通过名称访问 fc1: {model_named.fc1}")
+
+# === Sequential vs 自定义 Module ===
+# Sequential 优点：代码简洁
+# Sequential 缺点：不够灵活（不能有分支、跳跃连接等）
+
+# 自定义 Module 优点：完全自由的前向传播逻辑
+# 自定义 Module 缺点：代码稍长
+
+# 复杂网络必须用自定义 Module：
+class ComplexModule(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.branch1 = nn.Linear(100, 50)
+        self.branch2 = nn.Linear(100, 50)
+        self.merge = nn.Linear(100, 10)
+
+    def forward(self, x):
+        out1 = torch.relu(self.branch1(x))
+        out2 = torch.relu(self.branch2(x))
+        # 将两个分支拼接
+        merged = torch.cat([out1, out2], dim=1)
+        # 跳跃连接：将输入加到合并结果上
+        return self.merge(merged)
+```
+
+## 模型参数
+
+### 访问参数
+
+```python
+import torch
+import torch.nn as nn
+
+model = nn.Sequential(
+    nn.Linear(784, 256),
+    nn.ReLU(),
+    nn.Linear(256, 10),
+)
+
+# === 查看所有参数 ===
+print("=== model.parameters() ===")
+for i, param in enumerate(model.parameters()):
+    print(f"参数 {i}: shape={param.shape}, requires_grad={param.requires_grad}")
+
+# === 查看带名称的参数 ===
+print("\n=== model.named_parameters() ===")
+for name, param in model.named_parameters():
+    print(f"{name:20s} shape={str(param.shape):15s} numel={param.numel():>8d}")
+
+# === 统计参数总数 ===
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+print(f"\n总参数数量:     {total_params:,}")
+print(f"可训练参数数量: {trainable_params:,}")
+print(f"内存占用:       {total_params * 4 / 1024:.2f} KB (float32)")
+
+# === 访问特定层的参数 ===
+print(f"\n第0层 (Linear) 的权重: {model[0].weight.shape}")
+print(f"第0层 (Linear) 的偏置: {model[0].bias.shape}")
+```
+
+### nn.Parameter 与 buffer
+
+```python
+import torch
+import torch.nn as nn
+
+class ParameterDemo(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # === nn.Parameter：可学习的参数 ===
+        # 会被 model.parameters() 包含
+        # 会被 optimizer 更新
+        # 会被 state_dict() 保存
+        self.learnable_weight = nn.Parameter(torch.randn(10, 10))
+        self.learnable_bias = nn.Parameter(torch.zeros(10))
+
+        # === 普通 buffer：非学习参数 ===
+        # 不会被 model.parameters() 包含
+        # 不会被 optimizer 更新
+        # 会被 state_dict() 保存
+        # 会被 .to(device) 一起移动
+        self.register_buffer('running_mean', torch.zeros(10))
+        self.register_buffer('running_var', torch.ones(10))
+        self.register_buffer('step_count', torch.tensor(0))
+
+        # === 普通属性：不会被追踪 ===
+        # 不会出现在 parameters() / buffers() / state_dict()
+        # 不会被 .to(device) 移动
+        self.name = "ParameterDemo"
+        self.config = {"lr": 0.001, "batch_size": 32}
+
+    def forward(self, x):
+        # 使用 running_mean 示例
+        return x @ self.learnable_weight + self.learnable_bias
+
+model = ParameterDemo()
+
+print("=== parameters() ===")
+for name, param in model.named_parameters():
+    print(f"  {name}: {param.shape}")
+
+print("\n=== buffers() ===")
+for name, buf in model.named_buffers():
+    print(f"  {name}: {buf.shape}")
+
+print("\n=== state_dict() ===")
+for key, value in model.state_dict().items():
+    print(f"  {key}: {value.shape}")
+
+# buffers 会随模型移动到 GPU
+if torch.cuda.is_available():
+    model.cuda()
+    print(f"\n移动到 GPU 后 step_count 所在设备: {model.step_count.device}")
+    print(f"普通属性 name 不受影响: {model.name}")
+```
+
+## 保存和加载模型
+
+模型持久化是训练流程的重要组成部分。
+
+```python
+import torch
+import torch.nn as nn
+
+# 创建并"假装"训练一个模型
+model = nn.Sequential(
+    nn.Linear(28*28, 256),
+    nn.ReLU(),
+    nn.Linear(256, 10),
+)
+
+# 模拟训练：修改一些参数
+with torch.no_grad():
+    model[0].weight.fill_(0.5)
+    model[0].bias.fill_(0.1)
+
+# === 方法1：保存整个模型（不推荐）===
+# 优点：简单
+# 缺点：依赖确切的目录结构，跨版本可能不兼容
+torch.save(model, "entire_model.pth")
+loaded_model = torch.load("entire_model.pth", weights_only=False)
+print("方法1：加载整个模型")
+
+# === 方法2：保存 state_dict（推荐）===
+# 优点：只保存参数，轻量，灵活
+# 缺点：需要重新构建模型结构
+torch.save(model.state_dict(), "model_weights.pth")
+
+# 加载 state_dict
+new_model = nn.Sequential(
+    nn.Linear(28*28, 256),
+    nn.ReLU(),
+    nn.Linear(256, 10),
+)
+new_model.load_state_dict(torch.load("model_weights.pth", weights_only=True))
+print("方法2：加载 state_dict - 参数恢复成功")
+
+# === 保存 checkpoint（训练中断恢复）===
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+epoch = 5
+loss = 0.234
+
+checkpoint = {
+    "epoch": epoch,
+    "model_state_dict": model.state_dict(),
+    "optimizer_state_dict": optimizer.state_dict(),
+    "loss": loss,
+    "hyperparams": {"lr": 0.01, "batch_size": 64},
+}
+
+torch.save(checkpoint, "checkpoint.pth")
+
+# 恢复训练
+checkpoint_loaded = torch.load("checkpoint.pth", weights_only=True)
+model.load_state_dict(checkpoint_loaded["model_state_dict"])
+optimizer.load_state_dict(checkpoint_loaded["optimizer_state_dict"])
+epoch = checkpoint_loaded["epoch"]
+loss = checkpoint_loaded["loss"]
+
+print(f"\n恢复训练：Epoch {epoch}, Loss {loss:.4f}")
+print(f"超参数: {checkpoint_loaded['hyperparams']}")
+
+# 清理临时文件
+import os
+for f in ["entire_model.pth", "model_weights.pth", "checkpoint.pth"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+## 完整示例：MNIST 三层 MLP
+
+将以上所有知识串联起来，构建一个用于 MNIST 手写数字识别的多层感知机。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MNIST_MLP(nn.Module):
+    """
+    用于 MNIST 分类的三层多层感知机
+
+    MNIST 图片: 28x28 灰度图 -> 展平为 784 维向量
+    输出: 10 个类别的概率分布 (0-9)
+    """
+
+    def __init__(self, input_size=784, hidden_size1=512,
+                 hidden_size2=256, num_classes=10, dropout_rate=0.3):
+        super().__init__()
+
+        # 第一隐藏层
+        self.fc1 = nn.Linear(input_size, hidden_size1)
+        self.bn1 = nn.BatchNorm1d(hidden_size1)
+        self.dropout1 = nn.Dropout(dropout_rate)
+
+        # 第二隐藏层
+        self.fc2 = nn.Linear(hidden_size1, hidden_size2)
+        self.bn2 = nn.BatchNorm1d(hidden_size2)
+        self.dropout2 = nn.Dropout(dropout_rate)
+
+        # 输出层
+        self.fc3 = nn.Linear(hidden_size2, num_classes)
+
+        # 初始化权重
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """使用 Kaiming 初始化权重"""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight, mode='fan_out',
+                                       nonlinearity='relu')
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+            elif isinstance(module, nn.BatchNorm1d):
+                nn.init.ones_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def forward(self, x):
+        """
+        前向传播
+
+        Args:
+            x: 输入张量，形状可以是 (batch_size, 28, 28) 或 (batch_size, 784)
+
+        Returns:
+            logits: 未归一化的分类分数，形状 (batch_size, 10)
+        """
+        # 如果输入是图像格式 (N, 28, 28)，展平为 (N, 784)
+        if x.dim() > 2:
+            x = x.view(x.size(0), -1)
+
+        # 第一层
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.dropout1(x)
+
+        # 第二层
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = F.relu(x)
+        x = self.dropout2(x)
+
+        # 输出层（不加 softmax -- CrossEntropyLoss 内置了）
+        x = self.fc3(x)
+
+        return x
+
+    def predict(self, x, device=None):
+        """
+        推理模式的前向传播，返回预测的类别
+        """
+        if device is not None:
+            x = x.to(device)
+        self.eval()
+        with torch.no_grad():
+            logits = self.forward(x)
+            probs = F.softmax(logits, dim=1)
+            predictions = torch.argmax(probs, dim=1)
+        return predictions, probs
+
+
+# === 实例化和测试 ===
+model = MNIST_MLP()
+print(model)
+print()
+
+# 分析模型结构
+total_params = sum(p.numel() for p in model.parameters())
+trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"总参数: {total_params:,}")
+print(f"可训练参数: {trainable_params:,}\n")
+
+# 各层参数分布
+print("各层参数统计:")
+print(f"{'层名':<15s} {'权重形状':<20s} {'参数量':>10s}")
+print("-" * 47)
+for name, param in model.named_parameters():
+    if 'weight' in name:
+        print(f"{name:<15s} {str(list(param.shape)):<20s} {param.numel():>10,d}")
+
+# 测试前向传播
+x_image = torch.randn(4, 28, 28)   # 4 张 28x28 图片
+x_flat = torch.randn(4, 784)       # 4 个 784 维向量
+
+# 两种输入格式都支持
+logits_from_image = model(x_image)
+logits_from_flat = model(x_flat)
+
+print(f"\n前向传播测试:")
+print(f"  图像输入 (4,28,28) -> 输出: {logits_from_image.shape}")
+print(f"  向量输入 (4,784)   -> 输出: {logits_from_flat.shape}")
+
+# 测试推理模式
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+test_input = torch.randn(3, 28, 28).to(device)
+predictions, probabilities = model.predict(test_input)
+print(f"\n推理测试:")
+print(f"  预测类别: {predictions}")
+print(f"  概率分布形状: {probabilities.shape}")
+print(f"  模型所在设备: {next(model.parameters()).device}")
+```
+
+### 这个模型的设计要点
+
+1. **BatchNorm**：夹在 Linear 和 ReLU 之间，稳定训练
+2. **Dropout**：放在激活函数之后，防止过拟合
+3. **Kaiming 初始化**：适配 ReLU 激活函数，防止梯度消失/爆炸
+4. **输出层不加 softmax**：因为 `nn.CrossEntropyLoss` 内部包含了 softmax
+5. **predict 方法**：独立设置 eval 模式和 no_grad，确保推理行为正确
+
+## 本节小结
+
+- `nn.Module` 是所有神经网络的基类，必须调用 `super().__init__()`
+- 在 `__init__()` 中定义层，在 `forward()` 中定义前向传播逻辑
+- 内置层 `nn.Linear`, `nn.Conv2d`, `nn.BatchNorm2d`, `nn.Dropout` 覆盖绝大多数场景
+- `nn.Sequential` 适合顺序执行的简单网络
+- `model.parameters()` 返回所有可学习参数，`model.named_parameters()` 返回带名称的
+- `nn.Parameter` 是可学习参数，`register_buffer()` 注册非学习但需保存的张量
+- 推荐使用 `state_dict()` 保存模型，比直接 `torch.save(model)` 更灵活
+- 保存完整 checkpoint 应包含 model、optimizer 的状态和训练元信息
+- 模型通过 `model.to(device)` 一次性移动到指定设备

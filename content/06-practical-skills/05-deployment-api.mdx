@@ -1,0 +1,413 @@
+---
+title: "模型部署与推理 API"
+description: "学习保存和加载 PyTorch 模型，使用 FastAPI 构建推理 API，并用 Docker 将模型服务容器化"
+part: "06-practical-skills"
+order: 5
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "掌握 PyTorch 模型的正确保存与加载方式（state_dict vs 完整模型）"
+  - "使用 Pydantic 定义 API 的请求和响应模型"
+  - "使用 FastAPI 构建推理 API 端点"
+  - "了解请求批处理以提高推理效率"
+  - "使用 uvicorn 启动 API 服务"
+  - "编写 Dockerfile 并使用 Docker 容器化模型服务"
+prerequisites: ["python-basics", "training-dnn", "cnn-pytorch"]
+keywords: ["deployment", "fastapi", "torch-save", "docker", "inference-api"]
+---
+
+# 一、模型部署生命周期
+
+模型训练完成后，它只是一个 `.pt` 文件——必须把它变成一个可以被其他系统调用的**服务**，才能真正创造价值。部署是将模型从"实验"变为"产品"的桥梁。
+
+典型流程：
+
+```
+训练模型 → 保存 → 加载 → 封装 API → 容器化 → 部署到服务器 → 监控
+```
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+```
+
+# 二、保存与加载 PyTorch 模型
+
+## 2.1 state_dict（推荐方式）
+
+`state_dict` 是一个 Python 字典，将每一层映射到其参数张量。**这是推荐的做法**，因为它只保存参数，不包含模型代码。
+
+```python
+# 先训练一个简单的模型用于演示
+class ImageClassifier(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.fc1 = nn.Linear(32 * 8 * 8, 128)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def forward(self, x):
+        x = self.pool(F.relu(self.conv1(x)))
+        x = self.pool(F.relu(self.conv2(x)))
+        x = x.view(x.size(0), -1)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+# 创建并"训练"（模拟）
+model = ImageClassifier(num_classes=10)
+print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
+
+# 保存：只保存 state_dict（推荐！）
+torch.save(model.state_dict(), 'model_state_dict.pt')
+print("state_dict 已保存到 model_state_dict.pt")
+
+# 加载：先实例化模型架构，再加载参数
+loaded_model = ImageClassifier(num_classes=10)
+loaded_model.load_state_dict(torch.load('model_state_dict.pt', weights_only=True))
+loaded_model.eval()
+print("模型已从 state_dict 加载并设为 eval 模式")
+```
+
+## 2.2 保存完整模型（不推荐用于生产）
+
+```python
+# 保存整个模型对象（包含架构代码）
+torch.save(model, 'full_model.pt')
+# 加载
+full_loaded = torch.load('full_model.pt', weights_only=False)
+# 问题：依赖原始代码环境，跨项目/跨版本不兼容
+```
+
+## 2.3 保存更多元信息（推荐）
+
+```python
+# 最佳实践：同时保存训练状态
+checkpoint = {
+    'epoch': 50,
+    'model_state_dict': model.state_dict(),
+    'optimizer_state_dict': torch.optim.Adam(model.parameters()).state_dict(),
+    'best_val_acc': 0.923,
+    'hyperparameters': {'lr': 0.001, 'batch_size': 64},
+    'class_names': ['airplane', 'car', 'bird', 'cat', 'deer',
+                    'dog', 'frog', 'horse', 'ship', 'truck'],
+}
+
+torch.save(checkpoint, 'checkpoint.pt')
+print("完整 checkpoint 已保存")
+
+# 恢复训练
+checkpoint_loaded = torch.load('checkpoint.pt', weights_only=True)
+model.load_state_dict(checkpoint_loaded['model_state_dict'])
+print(f"恢复 Epoch {checkpoint_loaded['epoch']}, "
+      f"最佳验证准确率: {checkpoint_loaded['best_val_acc']}")
+```
+
+# 三、使用 FastAPI 构建推理 API
+
+FastAPI 是现代 Python Web 框架，非常适合构建 ML 推理 API——它高性能、自带文档、支持异步。
+
+```python
+# 以下代码需要保存为 app.py 并用 uvicorn 运行
+# 这里展示完整结构
+
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
+from typing import List
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import io
+import base64
+
+# ===== 1. 定义请求/响应模型 =====
+class PredictionRequest(BaseModel):
+    """单样本预测请求"""
+    features: List[float] = Field(
+        ..., min_length=1, max_length=1000,
+        description="输入特征向量"
+    )
+
+class BatchPredictionRequest(BaseModel):
+    """批量预测请求"""
+    samples: List[List[float]] = Field(
+        ..., min_length=1, max_length=128,
+        description="多个输入样本"
+    )
+
+class PredictionResponse(BaseModel):
+    """预测响应"""
+    prediction: int
+    confidence: float
+    probabilities: List[float]
+
+class BatchPredictionResponse(BaseModel):
+    """批量预测响应"""
+    predictions: List[int]
+    confidences: List[float]
+
+# ===== 2. 定义模型（与训练时的架构必须一致） =====
+class MLPClassifier(nn.Module):
+    def __init__(self, input_dim=30, hidden_dim=128, num_classes=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden_dim // 2, num_classes)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+# ===== 3. FastAPI 应用 =====
+app = FastAPI(
+    title="ML Inference API",
+    description="PyTorch 模型推理服务",
+    version="1.0.0"
+)
+
+# 全局模型变量（在 startup 事件中加载）
+model = None
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+INPUT_DIM = 30
+NUM_CLASSES = 3
+
+@app.on_event("startup")
+async def load_model():
+    """服务启动时加载模型"""
+    global model
+    model = MLPClassifier(input_dim=INPUT_DIM, num_classes=NUM_CLASSES)
+    try:
+        model.load_state_dict(torch.load('model_state_dict.pt',
+                                         map_location=device,
+                                         weights_only=True))
+        model.to(device)
+        model.eval()
+        print(f"模型已加载到 {device}")
+    except FileNotFoundError:
+        # 开发阶段：使用随机初始化的模型
+        print("警告: 未找到模型文件, 使用随机初始化（仅用于测试）")
+        model.to(device)
+        model.eval()
+
+@app.get("/health")
+async def health_check():
+    """健康检查端点"""
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "device": str(device)
+    }
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict(request: PredictionRequest):
+    """单样本预测"""
+    if model is None:
+        raise HTTPException(status_code=503, detail="模型未加载")
+
+    # 输入验证
+    if len(request.features) != INPUT_DIM:
+        raise HTTPException(
+            status_code=400,
+            detail=f"期望 {INPUT_DIM} 个特征, 得到 {len(request.features)} 个"
+        )
+
+    # 推理
+    input_tensor = torch.tensor([request.features], dtype=torch.float32).to(device)
+    with torch.no_grad():
+        logits = model(input_tensor)
+        probs = F.softmax(logits, dim=1)
+        pred = torch.argmax(probs, dim=1).item()
+        confidence = probs[0, pred].item()
+
+    return PredictionResponse(
+        prediction=pred,
+        confidence=round(confidence, 4),
+        probabilities=[round(p, 4) for p in probs[0].tolist()]
+    )
+
+@app.post("/predict/batch", response_model=BatchPredictionResponse)
+async def predict_batch(request: BatchPredictionRequest):
+    """批量预测"""
+    if model is None:
+        raise HTTPException(status_code=503, detail="模型未加载")
+
+    input_tensor = torch.tensor(request.samples, dtype=torch.float32).to(device)
+    with torch.no_grad():
+        logits = model(input_tensor)
+        probs = F.softmax(logits, dim=1)
+        preds = torch.argmax(probs, dim=1)
+        confs = probs[range(len(preds)), preds]
+
+    return BatchPredictionResponse(
+        predictions=preds.tolist(),
+        confidences=[round(c, 4) for c in confs.tolist()]
+    )
+
+
+# ===== 4. 使用 curl 测试（在终端运行） =====
+# curl -X POST "http://localhost:8000/predict" \
+#   -H "Content-Type: application/json" \
+#   -d '{"features": [0.1, 0.2, ... 共30个值]}'
+
+# curl -X POST "http://localhost:8000/predict/batch" \
+#   -H "Content-Type: application/json" \
+#   -d '{"samples": [[0.1, ...], [0.2, ...]]}'
+```
+
+## 3.1 启动服务
+
+```bash
+# 安装依赖
+pip install fastapi uvicorn pydantic
+
+# 启动服务（开发模式，自动重载）
+uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+启动后访问 `http://localhost:8000/docs` 可以看到自动生成的 Swagger 文档，可以直接在上面测试 API。
+
+# 四、Docker 容器化
+
+将模型服务打包成 Docker 容器，确保在任何环境中一致运行。
+
+## 4.1 Dockerfile
+
+```dockerfile
+# 使用 PyTorch 官方镜像作为基础
+FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装 Python 依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制模型文件和代码
+COPY model_state_dict.pt .
+COPY app.py .
+
+# 暴露端口
+EXPOSE 8000
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# 启动命令
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+```
+
+## 4.2 requirements.txt
+
+```
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+torch==2.0.1
+numpy==1.24.3
+```
+
+## 4.3 构建与运行
+
+```bash
+# 构建镜像
+docker build -t ml-inference-api:v1 .
+
+# 运行容器
+docker run -d \
+  --name ml-api \
+  -p 8000:8000 \
+  -v $(pwd)/models:/app/models \
+  ml-inference-api:v1
+
+# 查看日志
+docker logs -f ml-api
+
+# 测试
+curl http://localhost:8000/health
+```
+
+# 五、性能优化要点
+
+## 批处理
+
+一次处理一个样本效率很低，GPU 的优势在于并行处理。批量推理可以显著提高吞吐量：
+
+```python
+# 一个简单的请求队列 + 动态批处理概念
+import time
+from collections import deque
+
+class DynamicBatcher:
+    """将单个请求累积成批次后一次性推理"""
+    def __init__(self, model, max_batch_size=64, max_wait_ms=100):
+        self.model = model
+        self.max_batch_size = max_batch_size
+        self.max_wait_ms = max_wait_ms
+        self.queue = deque()
+        self.last_batch_time = time.time()
+
+    async def add_request(self, features):
+        """添加请求到队列，返回 Future"""
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self.queue.append((features, future))
+
+        if (len(self.queue) >= self.max_batch_size or
+            (time.time() - self.last_batch_time) * 1000 > self.max_wait_ms):
+            await self._process_batch()
+
+        return await future
+
+    async def _process_batch(self):
+        """处理批次"""
+        if not self.queue:
+            return
+        batch = [item[0] for item in self.queue]
+        futures = [item[1] for item in self.queue]
+        self.queue.clear()
+        self.last_batch_time = time.time()
+
+        tensor = torch.tensor(batch, dtype=torch.float32)
+        with torch.no_grad():
+            outputs = self.model(tensor)
+
+        for i, future in enumerate(futures):
+            if not future.done():
+                future.set_result(outputs[i].tolist())
+```
+
+# 六、部署检查清单
+
+| 项目 | 检查内容 |
+|------|----------|
+| 模型保存 | 使用 state_dict，保存时记录架构信息 |
+| 输入验证 | 检查形状、数值范围、类型、NaN |
+| 错误处理 | 优雅处理无效输入，返回有意义的状态码 |
+| 设备管理 | 自动检测 CPU/CUDA，map_location |
+| eval 模式 | 推理前一定设置 model.eval() |
+| no_grad | 使用 torch.no_grad() 避免梯度计算 |
+| 健康检查 | `/health` 端点，方便负载均衡器和监控 |
+| 日志 | 记录推理请求和异常 |
+| 安全审计 | 输入大小限制、速率限制 |
+
+# 七、关键要点
+
+1. **保存 state_dict**，不要保存完整的模型对象——更小、更灵活。
+2. 保存 checkpoint 时附带**训练元信息**（epoch、最佳指标、超参数、类别名）。
+3. 推理前务必 `model.eval()` 和 `torch.no_grad()`。
+4. FastAPI + Pydantic 提供了**自动输入验证**和**交互式文档**。
+5. 批量推理能**显著提高 GPU 利用率**和吞吐量。
+6. Docker 保证模型在任何环境中的**一致性**。
+7. 生产环境中不要漏掉健康检查、日志和错误处理。

@@ -1,0 +1,247 @@
+---
+title: "PyTorch 入门介绍"
+description: "了解 PyTorch 是什么、它的动态计算图特性、生态系统组件，以及如何安装和验证 PyTorch 环境"
+part: "02-pytorch-basics"
+order: 1
+difficulty: "beginner"
+estimatedMinutes: 25
+objectives:
+  - "理解 PyTorch 的核心设计理念和动态计算图"
+  - "了解 PyTorch 生态系统的主要组件"
+  - "能够安装 PyTorch 并验证安装是否成功"
+  - "编写第一个 PyTorch 程序"
+prerequisites: ["python-basics", "numpy-fundamentals"]
+keywords: ["pytorch", "深度学习框架", "动态计算图", "tensor", "cuda", "安装"]
+---
+
+## 什么是 PyTorch？
+
+PyTorch 是由 Facebook（现在的 Meta）AI 研究团队开发的开源深度学习框架。它最初基于 Torch 库（Lua 语言）演进而来，自 2016 年发布以来，迅速成为学术界和工业界最受欢迎的深度学习框架之一。
+
+PyTorch 的核心是**张量计算**和**自动微分**。如果你熟悉 NumPy，可以把 PyTorch 理解为"GPU 加速版 NumPy + 自动求导"。它不仅支持在多块 GPU 上高效运行，还提供了构建、训练和部署神经网络的完整工具链。
+
+## 动态计算图（Dynamic Computation Graph）
+
+PyTorch 最显著的特性是**动态计算图**（也叫 Define-by-Run）。这意味着计算图是在代码实际运行时动态构建的，而不是在执行前预先定义。
+
+```python
+import torch
+
+# 计算图随着每一行代码的执行而动态构建
+x = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
+y = x * 2          # 乘法节点加入计算图
+z = y.mean()       # 均值节点加入计算图
+z.backward()       # 反向传播，计算梯度
+print(x.grad)      # tensor([0.6667, 0.6667, 0.6667])
+```
+
+### 动态图 vs 静态图
+
+| 特性 | PyTorch (动态图) | TensorFlow 1.x (静态图) |
+|------|-----------------|----------------------|
+| 图构建时机 | 运行时即时构建 | 先定义再执行 |
+| 调试体验 | 可用 Python 调试器直接调试 | 需要特殊调试工具 |
+| 控制流 | 原生 Python if/for/while | 需特殊算子 (tf.cond, tf.while_loop) |
+| 灵活性 | 极高，适合研究和原型开发 | 部署优化更成熟 |
+
+这种"即写即运行"的方式使得 PyTorch 的学习曲线更平滑，代码更直观，调试也更方便。如果你在 `y = x * 2` 这行打个断点，你可以直接查看 `y` 的值 -- 这在静态图框架中是做不到的。
+
+## PyTorch 生态系统
+
+PyTorch 不仅仅是一个张量计算库，它有一套完整的生态系统：
+
+### 核心库
+
+- **torch**: 核心张量操作、自动微分、神经网络模块（nn.Module）、优化器等
+- **torch.cuda**: CUDA 张量操作和 GPU 管理
+- **torch.nn**: 神经网络层、损失函数、构建块
+- **torch.optim**: 优化算法（SGD, Adam, AdamW, RMSprop 等）
+- **torch.utils.data**: 数据加载工具（Dataset, DataLoader）
+- **torch.distributed**: 分布式训练支持
+
+### 领域库
+
+- **torchvision**: 计算机视觉（预训练模型、数据集、图像变换）
+- **torchaudio**: 音频处理（加载、变换、特征提取）
+- **torchtext**: 自然语言处理（文本数据加载、词向量、分词器）
+
+### 高级库
+
+- **torch.jit**: 模型序列化、TorchScript 编译（优化部署）
+- **Lightning**: 研究者的高级接口，减少样板代码
+- **Transformers (HuggingFace)**: 预训练 NLP/CV 模型
+
+```python
+# 生态系统示例：用 torchvision 加载预训练模型
+import torchvision.models as models
+
+# 加载在 ImageNet 上预训练的 ResNet-50
+resnet = models.resnet50(pretrained=True)
+resnet.eval()  # 切换到评估模式
+print(resnet)
+
+# torchaudio 示例
+import torchaudio
+waveform, sample_rate = torchaudio.load("audio.wav")
+mel_spectrogram = torchaudio.transforms.MelSpectrogram()(waveform)
+```
+
+## PyTorch vs TensorFlow vs JAX
+
+### PyTorch
+
+- **优势**: 易于使用、调试友好、研究社区首选、文档优秀
+- **适合**: 研究、原型开发、教育、中小规模部署
+
+### TensorFlow / Keras
+
+- **优势**: 生产部署成熟（TF Serving, TF Lite, TF.js）、大规模分布式训练
+- **适合**: 工业级大规模部署、移动端/边缘设备
+
+### JAX
+
+- **优势**: 函数式编程风格、自动向量化（vmap）、即时编译（jit）、TPU 支持极好
+- **适合**: 需要细粒度控制的计算密集型研究、大规模并行训练
+
+目前（2024-2026 年），PyTorch 在学术界的使用率已超过 80%，在工业界的采用率也在快速增长。大部分最新论文的官方实现都是基于 PyTorch 的。
+
+## 安装 PyTorch
+
+### 使用 pip 安装
+
+```bash
+# CPU 版本（无需 NVIDIA 显卡）
+pip install torch torchvision torchaudio
+
+# CUDA 11.8 版本（有 NVIDIA 显卡）
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+# CUDA 12.1 版本
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+### 使用 conda 安装
+
+```bash
+# CPU 版本
+conda install pytorch torchvision torchaudio cpuonly -c pytorch
+
+# CUDA 版本
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+```
+
+### 选择合适的版本
+
+- **CPU 版本**: 适用于学习和小型实验，不需要 NVIDIA 显卡
+- **CUDA 版本**: 需要 NVIDIA 显卡和 CUDA 驱动，可大幅加速训练
+- **macOS (Apple Silicon)**: 使用 MPS 后端加速，PyTorch 2.0+ 原生支持
+
+## 验证安装
+
+安装完成后，运行以下代码验证一切正常：
+
+```python
+import torch
+import torchvision
+import torchaudio
+
+# 1. 检查 PyTorch 版本
+print(f"PyTorch 版本: {torch.__version__}")
+
+# 2. 检查 torchvision 和 torchaudio 版本
+print(f"torchvision 版本: {torchvision.__version__}")
+print(f"torchaudio 版本: {torchaudio.__version__}")
+
+# 3. 检查 CUDA 是否可用
+cuda_available = torch.cuda.is_available()
+print(f"CUDA 是否可用: {cuda_available}")
+
+if cuda_available:
+    print(f"CUDA 版本: {torch.version.cuda}")
+    print(f"cuDNN 版本: {torch.backends.cudnn.version()}")
+    print(f"GPU 数量: {torch.cuda.device_count()}")
+    print(f"当前 GPU: {torch.cuda.get_device_name(0)}")
+else:
+    print("未检测到 CUDA，将使用 CPU 进行计算")
+
+# 4. 检查 MPS（Apple Silicon）是否可用
+if torch.backends.mps.is_available():
+    print("MPS (Apple Silicon) 可用")
+```
+
+## 你的第一个 PyTorch 程序
+
+```python
+import torch
+
+print("=== 我的第一个 PyTorch 程序 ===\n")
+
+# 1. 创建张量
+a = torch.tensor([1, 2, 3])
+b = torch.tensor([4, 5, 6])
+print(f"张量 a: {a}")
+print(f"张量 b: {b}")
+
+# 2. 基本运算
+print(f"\na + b = {a + b}")
+print(f"a * b = {a * b}")
+print(f"a 和 b 的点积 = {torch.dot(a.float(), b.float())}")
+
+# 3. 创建随机张量
+x = torch.randn(3, 3)  # 3x3 标准正态分布
+print(f"\n随机张量 x:\n{x}")
+
+# 4. 矩阵运算
+print(f"\nx 的转置:\n{x.T}")
+print(f"x @ x.T (矩阵乘法):\n{x @ x.T}")
+
+# 5. GPU 检测
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"\n运行设备: {device}")
+
+# 6. 一个简单的数学计算（为后续自动微分做铺垫）
+w = torch.tensor(2.0, requires_grad=True)
+f = w ** 2  # f(w) = w^2
+f.backward()  # 计算 df/dw
+print(f"\nw = 2.0, f(w) = w^2 = {f.item()}")
+print(f"f'(w) = 2w = {w.grad.item()} (梯度)")
+```
+
+### 运行结果解读
+
+- 张量的四则运算与 NumPy 非常相似
+- `torch.dot()` 计算两个向量的点积
+- `@` 运算符执行矩阵乘法
+- `requires_grad=True` 表示我们需要对该张量计算梯度
+- `.backward()` 触发反向传播，自动计算出导数 `f'(2) = 4`
+
+## 为什么 PyTorch 是研究和教育的首选？
+
+### 1. Pythonic 设计
+
+PyTorch 的 API 设计遵循 Python 惯用风格。如果你会 Python 和 NumPy，就能很快上手 PyTorch。控制流使用原生 Python 语法，不需要学习额外的 DSL（领域特定语言）。
+
+### 2. 调试友好
+
+因为 PyTorch 使用动态计算图，你可以使用任何标准的 Python 调试工具（pdb, ipdb, IDE 断点）。当程序出错时，错误信息直接指向出错的代码行，而不是来自遥远的图执行阶段。
+
+### 3. 灵活的研究平台
+
+动态图意味着模型结构可以根据输入动态变化 -- 这在 NLP 中处理变长序列、在强化学习中与环境交互时尤其重要。你可以随时打印、修改、检查中间结果。
+
+### 4. 活跃的社区
+
+PyTorch 拥有庞大的研究者社区，大部分 AI/ML 顶会论文的官方代码都基于 PyTorch。这意味着你可以轻松复现最新研究成果，与前沿保持同步。
+
+### 5. 学术与工业的桥梁
+
+从实验室到生产的路径越来越短。TorchScript、TorchServe、ONNX 导出等工具使得 PyTorch 模型可以直接部署到生产环境。
+
+## 本节小结
+
+- PyTorch 是一个**动态计算图**框架，代码即时执行，调试方便
+- 生态系统包含 torch, torchvision, torchaudio, torchtext 等完整组件
+- 安装简单，支持 CPU/CUDA/MPS 多种后端
+- 是当前学术界最流行的深度学习框架
+
+在后续课程中，我们将从张量操作开始，逐步深入到自动微分、神经网络构建和数据加载，最终能够从零搭建完整的深度学习项目。

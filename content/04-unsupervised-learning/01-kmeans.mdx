@@ -1,0 +1,295 @@
+---
+title: "K-Means 聚类算法"
+description: "从零开始理解并实现 K-Means 聚类算法，掌握无监督学习的核心思想与评估方法"
+part: "04-unsupervised-learning"
+order: 1
+difficulty: "intermediate"
+estimatedMinutes: 35
+objectives:
+  - "理解聚类的核心概念：无需标签，将相似数据点分组"
+  - "掌握 K-Means 算法的完整迭代流程"
+  - "对比不同的初始化策略：随机、Forgy、K-Means++"
+  - "学会使用 Elbow Method、Silhouette Score 和 Gap Statistic 选择最优 K 值"
+  - "用 PyTorch 从零实现 K-Means，并进行可视化与图像压缩实战"
+prerequisites: ["python-basics", "numpy-fundamentals", "linear-algebra"]
+keywords: ["K-Means", "聚类", "无监督学习", "肘部法则", "轮廓系数", "颜色量化"]
+---
+
+# K-Means 聚类算法
+
+聚类是无监督学习中最经典的任务之一。与分类不同，聚类不需要标签数据，目标是根据数据点之间的相似性自动将它们分组。K-Means 是最广泛使用的聚类算法，因其简单、高效而备受青睐。
+
+## 聚类的基本思想
+
+给定一组数据点 $\{x_1, x_2, \ldots, x_n\} \subset \mathbb{R}^d$，我们希望将它们划分为 $K$ 个不相交的子集 $S_1, S_2, \ldots, S_K$，使得同一簇内的点尽可能"相似"，不同簇之间的点尽可能"不同"。
+
+K-Means 用**质心**（centroid）来代表每个簇，将每个点分配给距离最近的质心。
+
+## K-Means 算法步骤
+
+算法在以下两个步骤之间交替迭代，直至收敛：
+
+1. **分配步骤**：将每个数据点 $x_i$ 分配给离它最近的质心 $\mu_j$：
+   $$c_i = \arg\min_{j} \|x_i - \mu_j\|^2$$
+
+2. **更新步骤**：重新计算每个簇的质心，即簇内所有点的均值：
+   $$\mu_j = \frac{1}{|S_j|} \sum_{x_i \in S_j} x_i$$
+
+这两个步骤重复执行，直到质心不再变化（或变化极小），或达到最大迭代次数。该过程等价于最小化簇内平方和（Within-Cluster Sum of Squares, WCSS）：
+
+$$\text{WCSS} = \sum_{j=1}^{K} \sum_{x_i \in S_j} \|x_i - \mu_j\|^2$$
+
+## 初始化方法
+
+**随机初始化**：从数据集中随机选择 $K$ 个点作为初始质心。简单但有风险——选择不当会导致收敛到局部最优。
+
+**Forgy 方法**：从数据集中均匀随机选取 $K$ 个点。这是 scikit-learn 中 `init='random'` 采用的策略。
+
+**K-Means++**：一种智能初始化方式，以概率方式选择彼此尽可能远的点作为初始质心：
+
+1. 随机选择第一个质心
+2. 对于每个点 $x_i$，计算其到最近已选质心的距离 $D(x_i)$
+3. 以概率 $\frac{D(x_i)^2}{\sum D(x)^2}$ 选择下一个质心
+4. 重复直到选出 $K$ 个质心
+
+K-Means++ 通常能获得更好的最终结果，是 scikit-learn 的默认初始化方式。
+
+## 从零实现 K-Means（PyTorch）
+
+```python
+import torch
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+
+def kmeans_init_plusplus(X, K, seed=None):
+    """K-Means++ 初始化"""
+    if seed is not None:
+        torch.manual_seed(seed)
+    n = X.shape[0]
+    centroids = []
+    idx = torch.randint(0, n, (1,)).item()
+    centroids.append(X[idx].clone())
+
+    for _ in range(1, K):
+        dists = torch.stack([
+            torch.sum((X - c) ** 2, dim=1) for c in centroids
+        ])  # shape: (k_selected, n)
+        min_dists, _ = dists.min(dim=0)  # 每个点到最近质心的距离
+        probs = min_dists / min_dists.sum()
+        idx = torch.multinomial(probs, 1).item()
+        centroids.append(X[idx].clone())
+
+    return torch.stack(centroids)
+
+def kmeans(X, K, max_iters=100, tol=1e-4, init='kmeans++', seed=None):
+    """
+    K-Means 聚类算法
+    Args:
+        X: 数据张量，shape (n_samples, n_features)
+        K: 簇的数量
+        max_iters: 最大迭代次数
+        tol: 收敛阈值
+        init: 初始化方式 ('random' 或 'kmeans++')
+        seed: 随机种子
+    Returns:
+        centroids: 最终质心
+        labels: 每个点的簇标签
+        history: 每次迭代的质心列表（用于动画）
+    """
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    n = X.shape[0]
+    if init == 'kmeans++':
+        centroids = kmeans_init_plusplus(X, K, seed)
+    else:
+        indices = torch.randperm(n)[:K]
+        centroids = X[indices].clone()
+
+    history = [centroids.clone()]
+
+    for iteration in range(max_iters):
+        # 分配步骤：计算每个点到所有质心的距离
+        distances = torch.cdist(X, centroids)  # (n, K)
+        labels = torch.argmin(distances, dim=1)  # (n,)
+
+        # 更新步骤：重新计算质心
+        new_centroids = torch.zeros_like(centroids)
+        for k in range(K):
+            mask = (labels == k)
+            if mask.sum() > 0:
+                new_centroids[k] = X[mask].mean(dim=0)
+            else:
+                # 空簇处理：随机重新初始化
+                new_centroids[k] = X[torch.randint(0, n, (1,))]
+
+        # 检查收敛
+        shift = torch.norm(new_centroids - centroids)
+        centroids = new_centroids
+        history.append(centroids.clone())
+
+        if shift < tol:
+            print(f"在第 {iteration + 1} 次迭代后收敛")
+            break
+
+    # 最终分配
+    distances = torch.cdist(X, centroids)
+    labels = torch.argmin(distances, dim=1)
+
+    return centroids, labels, history
+
+# 生成测试数据
+X_np, y_true = make_blobs(n_samples=300, centers=4,
+                          cluster_std=0.60, random_state=0)
+X = torch.tensor(X_np, dtype=torch.float32)
+
+# 运行 K-Means
+centroids, labels, history = kmeans(X, K=4, init='kmeans++', seed=42)
+
+print(f"最终 WCSS: {torch.sum((X - centroids[labels]) ** 2):.2f}")
+```
+
+## 可视化聚类过程
+
+```python
+def plot_kmeans_iteration(X, centroids, labels, iteration):
+    """绘制单次迭代的聚类结果"""
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for k in range(centroids.shape[0]):
+        mask = labels.numpy() == k
+        ax.scatter(X[mask, 0], X[mask, 1], s=30, alpha=0.7,
+                   label=f'簇 {k+1}')
+    ax.scatter(centroids[:, 0], centroids[:, 1], marker='X',
+               s=200, c='red', edgecolors='black', linewidths=1.5,
+               label='质心')
+    ax.set_title(f'迭代 {iteration}')
+    ax.legend()
+    return fig
+
+# 展示初始、中间和最终状态
+for step in [0, 3, -1]:
+    centroids_step = history[step]
+    distances = torch.cdist(X, centroids_step)
+    labels_step = torch.argmin(distances, dim=1)
+    plot_kmeans_iteration(X, centroids_step, labels_step, step)
+    plt.show()
+```
+
+## 为什么不同初始化结果不同
+
+K-Means 的目标函数是非凸的，优化过程可能陷入局部最优。K-Means++ 通过"尽可能分散"的策略降低了这种风险。实践中常运行多次 K-Means（不同种子），取 WCSS 最小的那次结果：
+
+```python
+def kmeans_multiple_runs(X, K, n_runs=10):
+    """多次运行 K-Means，返回最佳结果"""
+    best_wcss = float('inf')
+    best_result = None
+    for run in range(n_runs):
+        centroids, labels, _ = kmeans(X, K=K, init='random', seed=run)
+        wcss = torch.sum((X - centroids[labels]) ** 2)
+        if wcss < best_wcss:
+            best_wcss = wcss
+            best_result = (centroids, labels)
+    print(f"最佳 WCSS: {best_wcss:.2f}")
+    return best_result
+```
+
+## 选择 K 值
+
+K-Means 需要预先指定 K，但实际中我们通常不知道最优 K。以下是三种常用方法：
+
+### Elbow Method（肘部法则）
+
+绘制不同 K 值对应的 WCSS，寻找"肘部"——即 WCSS 下降速率显著减缓的点。
+
+```python
+def elbow_method(X, K_max=10):
+    wcss_values = []
+    for K in range(1, K_max + 1):
+        centroids, labels, _ = kmeans(X, K=K, init='kmeans++', seed=42)
+        wcss = torch.sum((X - centroids[labels]) ** 2).item()
+        wcss_values.append(wcss)
+
+    plt.plot(range(1, K_max + 1), wcss_values, 'bo-')
+    plt.xlabel('K (簇数量)')
+    plt.ylabel('WCSS (簇内平方和)')
+    plt.title('Elbow Method')
+    plt.show()
+    return wcss_values
+```
+
+### Silhouette Score（轮廓系数）
+
+对于每个点 $x_i$，设 $a_i$ 为到同簇其他点的平均距离（凝聚度），$b_i$ 为到最近其他簇所有点的平均距离（分离度）。轮廓系数定义为：
+
+$$s(i) = \frac{b_i - a_i}{\max(a_i, b_i)}$$
+
+取值范围 $[-1, 1]$，越大越好。
+
+```python
+from sklearn.metrics import silhouette_score
+
+def silhouette_analysis(X, K_max=10):
+    scores = []
+    for K in range(2, K_max + 1):
+        _, labels, _ = kmeans(X, K=K, init='kmeans++', seed=42)
+        score = silhouette_score(X.numpy(), labels.numpy())
+        scores.append(score)
+    best_K = scores.index(max(scores)) + 2
+    print(f"最佳 K (Silhouette): {best_K}, 得分: {max(scores):.3f}")
+    return scores
+```
+
+## K-Means 的局限性
+
+1. **球形簇假设**：K-Means 使用欧氏距离，天然倾向于发现球形簇，对细长或非凸形状效果差
+2. **对初始化敏感**：糟糕的初始质心会导致差的结果
+3. **对异常值敏感**：单个离群点可能显著拉偏质心
+4. **需要预先指定 K**：实际应用中往往难以提前知道最优簇数
+5. **所有特征等权重**：不同量纲的特征会影响距离计算，需要标准化
+
+## 实战应用：图像压缩（颜色量化）
+
+将图像中成千上万种颜色压缩为 $K$ 种代表性颜色，大幅减少存储空间：
+
+```python
+from PIL import Image
+import numpy as np
+
+def color_quantization(image_path, K=16):
+    """用 K-Means 进行颜色量化"""
+    img = Image.open(image_path)
+    img_array = np.array(img) / 255.0  # 归一化
+    h, w, c = img_array.shape
+
+    # 将像素展平为 (N, 3) 的矩阵
+    pixels = torch.tensor(img_array.reshape(-1, 3), dtype=torch.float32)
+
+    # K-Means 聚类
+    centroids, labels, _ = kmeans(pixels, K=K, max_iters=20, seed=42)
+
+    # 用质心颜色替换每个像素
+    compressed_pixels = centroids[labels].numpy()
+    compressed_img = compressed_pixels.reshape(h, w, c)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+    axes[0].imshow(img_array)
+    axes[0].set_title(f'原始图像 ({len(np.unique(pixels.numpy(), axis=0))} 种颜色)')
+    axes[1].imshow(compressed_img)
+    axes[1].set_title(f'压缩后 (K={K} 种颜色)')
+    plt.show()
+
+    return compressed_img
+```
+
+## 实际应用场景
+
+- **客户细分**：根据购买行为、人口统计特征将客户分组，制定精准营销策略
+- **文档聚类**：对新闻文章或学术论文自动分组
+- **图像分割**：将图像像素按颜色/纹理聚类实现区域分割
+- **异常检测**：远离所有质心的点可能是异常点
+- **特征学习**：将聚类结果作为下游任务的预处理特征
+
+## 小结
+
+K-Means 简洁高效，是理解无监督学习的绝佳起点。其核心思想——交替优化——在机器学习中非常普遍。虽然有其局限性，但通过 K-Means++ 初始化、多次运行取最优、标准化数据等实践技巧，它在许多实际场景中依然表现出色。当数据不能满足球形成簇假设时，下一课我们将学习 DBSCAN 和层次聚类。

@@ -1,0 +1,463 @@
+---
+title: "深度神经网络：训练与优化"
+description: "深入理解 DNN 的训练机制：前向传播、反向传播、梯度下降变体与学习率调度"
+part: "03-supervised-learning"
+order: 7
+difficulty: "intermediate"
+estimatedMinutes: 40
+objectives:
+  - "理解前向传播与反向传播的直觉原理"
+  - "掌握链式法则在多层网络梯度计算中的应用"
+  - "对比 SGD、Momentum、Adam、AdamW 优化器"
+  - "理解 Adam 的自适应学习率与动量机制"
+  - "学会使用学习率调度器与梯度裁剪"
+  - "构建包含所有组件的完整训练模板"
+prerequisites: ["dnn-architecture", "linear-regression-pytorch", "calculus-basics"]
+keywords: ["backpropagation", "adam", "sgd", "learning-rate-scheduler", "gradient-clipping"]
+---
+
+# 一、前向传播（Forward Pass）
+
+前向传播将输入数据逐层通过整个网络，计算预测结果：
+
+$$\mathbf{h}^{(0)} = \mathbf{x}$$
+
+$$\mathbf{z}^{(\ell)} = \mathbf{W}^{(\ell)} \mathbf{h}^{(\ell-1)} + \mathbf{b}^{(\ell)}$$
+
+$$\mathbf{h}^{(\ell)} = \sigma(\mathbf{z}^{(\ell)})$$
+
+最后一层得到 $\hat{\mathbf{y}} = \mathbf{h}^{(L)}$（或 $\mathbf{z}^{(L)}$，取决于任务），然后计算损失 $\mathcal{L}(\hat{\mathbf{y}}, \mathbf{y})$。
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_moons
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# 准备数据（使用非线性可分的 make_moons）
+X_np, y_np = make_moons(n_samples=1000, noise=0.2, random_state=42)
+X_np = StandardScaler().fit_transform(X_np)
+X_train, X_test, y_train, y_test = train_test_split(
+    X_np, y_np, test_size=0.2, random_state=42)
+
+X_train_t = torch.tensor(X_train, dtype=torch.float32)
+X_test_t = torch.tensor(X_test, dtype=torch.float32)
+y_train_t = torch.tensor(y_train, dtype=torch.long)
+y_test_t = torch.tensor(y_test, dtype=torch.long)
+
+print(f"训练数据: {X_train_t.shape}, 标签分布: {torch.bincount(y_train_t)}")
+```
+
+# 二、反向传播（Backpropagation）
+
+## 直觉理解
+
+反向传播是计算损失函数关于每个参数的梯度的算法。其核心是**链式法则（Chain Rule）**，从输出层逐层向输入层传递误差信号。
+
+对于第 $\ell$ 层的权重 $\mathbf{W}^{(\ell)}$，其梯度可以分解为：
+
+$$\frac{\partial \mathcal{L}}{\partial \mathbf{W}^{(\ell)}} = \frac{\partial \mathcal{L}}{\partial \mathbf{z}^{(\ell)}} \cdot \frac{\partial \mathbf{z}^{(\ell)}}{\partial \mathbf{W}^{(\ell)}}$$
+
+其中 $\frac{\partial \mathcal{L}}{\partial \mathbf{z}^{(\ell)}}$（通常记为 $\delta^{(\ell)}$）是"从该层传递过来的误差信号"。
+
+## 链式法则的递归结构
+
+从第 $\ell$ 层到第 $\ell-1$ 层，误差信号这样传播：
+
+$$\delta^{(\ell-1)} = \frac{\partial \mathcal{L}}{\partial \mathbf{z}^{(\ell-1)}} = \left( (\mathbf{W}^{(\ell)})^T \delta^{(\ell)} \right) \odot \sigma'(\mathbf{z}^{(\ell-1)})$$
+
+其中 $\odot$ 表示逐元素乘法，$\sigma'$ 是激活函数的导数。
+
+## 完整的四个步骤
+
+对于每一层 $\ell$：
+
+1. **计算 $\delta^{(\ell)}$**（从后往前传递）
+2. **权重梯度**: $\frac{\partial \mathcal{L}}{\partial \mathbf{W}^{(\ell)}} = \delta^{(\ell)} (\mathbf{h}^{(\ell-1)})^T$
+3. **偏置梯度**: $\frac{\partial \mathcal{L}}{\partial \mathbf{b}^{(\ell)}} = \delta^{(\ell)}$
+4. **传递到上一层**: $\delta^{(\ell-1)} = (\mathbf{W}^{(\ell)})^T \delta^{(\ell)} \odot \sigma'(\mathbf{z}^{(\ell-1)})$
+
+```python
+# 手动实现一个极简版反传（仅作教学演示）
+def manual_backprop_demo():
+    """演示两层网络的反向传播原理"""
+    torch.manual_seed(42)
+    # 一个小规模示例
+    x = torch.randn(3, 2)          # 3 个样本，2 个特征
+    y = torch.randint(0, 2, (3,))  # 二分类标签
+
+    W1 = torch.randn(2, 4, requires_grad=False)
+    b1 = torch.randn(4, requires_grad=False)
+    W2 = torch.randn(4, 1, requires_grad=False)
+    b2 = torch.randn(1, requires_grad=False)
+
+    # 前向传播
+    z1 = x @ W1 + b1
+    h1 = torch.sigmoid(z1)
+    z2 = h1 @ W2 + b2
+
+    # 损失（BCEWithLogits 手动计算）
+    probs = torch.sigmoid(z2)
+    loss = -torch.mean(y.float().unsqueeze(1) * torch.log(probs + 1e-8)
+                       + (1 - y.float().unsqueeze(1)) * torch.log(1 - probs + 1e-8))
+
+    # 手动反向传播
+    # 输出层梯度
+    dL_dz2 = (probs - y.float().unsqueeze(1)) / len(y)   # BCE + Sigmoid 的梯度
+    dL_dW2 = h1.T @ dL_dz2
+    dL_db2 = dL_dz2.sum(dim=0)
+
+    # 隐藏层梯度
+    dL_dh1 = dL_dz2 @ W2.T
+    dL_dz1 = dL_dh1 * (h1 * (1 - h1))  # Sigmoid 的导数: σ'(z) = σ(z)(1-σ(z))
+    dL_dW1 = x.T @ dL_dz1
+    dL_db1 = dL_dz1.sum(dim=0)
+
+    print("手动计算的梯度:")
+    print(f"  dL/dW1 shape: {dL_dW1.shape}")
+    print(f"  dL/dW2 shape: {dL_dW2.shape}")
+    print(f"  loss: {loss.item():.4f}")
+
+    # 用 PyTorch Autograd 验证
+    W1_g, b1_g, W2_g, b2_g = [t.clone().requires_grad_(True)
+                                for t in [W1, b1, W2, b2]]
+    z1_a = x @ W1_g + b1_g
+    h1_a = torch.sigmoid(z1_a)
+    z2_a = h1_a @ W2_g + b2_g
+    probs_a = torch.sigmoid(z2_a)
+    loss_a = -torch.mean(y.float().unsqueeze(1) * torch.log(probs_a + 1e-8)
+                         + (1 - y.float().unsqueeze(1)) * torch.log(1 - probs_a + 1e-8))
+    loss_a.backward()
+
+    print("\nAutograd 计算的梯度:")
+    print(f"  dL/dW1 差异: {(dL_dW1 - W1_g.grad).abs().max().item():.2e}")
+    print(f"  dL/dW2 差异: {(dL_dW2 - W2_g.grad).abs().max().item():.2e}")
+
+manual_backprop_demo()
+```
+
+**要点**：在 PyTorch 中，你**永远不需要手动实现反向传播**。`loss.backward()` 会自动完成。但理解其原理有助于调试训练问题（如梯度消失/爆炸）。
+
+# 三、优化器详解
+
+## SGD (Stochastic Gradient Descent)
+
+最基本的优化方法：
+
+$$\mathbf{W} \leftarrow \mathbf{W} - \eta \cdot \nabla_{\mathbf{W}} \mathcal{L}$$
+
+其中 $\eta$ 是学习率。
+
+```python
+# SGD 示例
+optimizer_sgd = optim.SGD(model.parameters(), lr=0.01)
+```
+
+## SGD + Momentum
+
+引入动量项，让梯度更新带有"惯性"，有助于加速收敛和逃离局部极小值：
+
+$$\begin{aligned}
+\mathbf{v} &\leftarrow \mu \mathbf{v} + \eta \cdot \nabla_{\mathbf{W}} \mathcal{L} \\
+\mathbf{W} &\leftarrow \mathbf{W} - \mathbf{v}
+\end{aligned}$$
+
+```python
+optimizer_sgdm = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+```
+
+其中 $\mu=0.9$ 意味着每个更新步骤中，90% 来自之前的更新方向，10% 来自当前梯度。
+
+## Adam (Adaptive Moment Estimation)
+
+Adam 结合了 **Momentum**（一阶矩）和 **RMSprop**（二阶矩），是目前最常用的优化器之一。
+
+对每个参数 $\theta_j$：
+
+$$\begin{aligned}
+m_t &= \beta_1 m_{t-1} + (1 - \beta_1) g_t \quad &\text{(一阶矩, 动量)} \\
+v_t &= \beta_2 v_{t-1} + (1 - \beta_2) g_t^2 \quad &\text{(二阶矩, 自适应学习率)} \\
+\hat{m}_t &= \frac{m_t}{1 - \beta_1^t} \quad &\text{(偏差校正)} \\
+\hat{v}_t &= \frac{v_t}{1 - \beta_2^t} \quad &\text{(偏差校正)} \\
+\theta_{t} &= \theta_{t-1} - \frac{\eta}{\sqrt{\hat{v}_t} + \epsilon} \hat{m}_t
+\end{aligned}$$
+
+**关键特性**：
+- **自适应学习率**：每个参数有独立的学习率，梯度波动大的参数使用较小的学习率。
+- **动量**：平滑更新方向，克服噪声和鞍点。
+- **偏差校正**：在训练初期，$m_t$ 和 $v_t$ 被初始化为 0，偏差校正避免了早期步长过小的问题。
+
+```python
+optimizer_adam = optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999))
+```
+
+## AdamW
+
+AdamW 将**权重衰减（Weight Decay）**与自适应学习率解耦，是 Adam 的改进版：
+
+$$\theta_{t} = \theta_{t-1} - \eta \left( \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} + \lambda \theta_{t-1} \right)$$
+
+相比 Adam 中把 L2 正则化放在损失函数中，AdamW 将权重衰减直接应用到参数更新中，性能更好且更稳定。
+
+```python
+optimizer_adamw = optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
+```
+
+## 优化器选择指南
+
+| 场景 | 推荐优化器 |
+|------|-----------|
+| 快速原型验证 | Adam (lr=0.001) |
+| 图像分类（CNN） | SGD + Momentum (lr=0.1, momentum=0.9) |
+| Transformer / NLP | AdamW (lr=1e-4 到 3e-4) |
+| GAN / 强化学习 | Adam (lr=1e-4) |
+| 追求最高精度 | SGD + Momentum + CosineAnnealingLR |
+
+# 四、学习率调度
+
+学习率是训练中最重要的超参数之一。合理的调度策略可以显著提升最终性能。
+
+## StepLR：阶梯式衰减
+
+```python
+scheduler_step = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+# 每 30 个 epoch 将学习率乘以 0.1
+```
+
+## CosineAnnealingLR：余弦退火
+
+```python
+scheduler_cos = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=100)
+# 学习率沿着余弦曲线从初始值降到 0，周期为 T_max
+```
+
+## ReduceLROnPlateau：基于验证指标的自适应衰减
+
+```python
+scheduler_plateau = optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6)
+# 当验证损失连续 10 个 epoch 不下降时，学习率减半
+```
+
+## 对比可视化
+
+```python
+def visualize_schedulers():
+    """可视化不同学习率调度策略"""
+    model_temp = nn.Linear(2, 2)
+    opt = optim.SGD(model_temp.parameters(), lr=1.0)
+    epochs = 150
+
+    schedulers = {
+        'StepLR (step=30, gamma=0.5)':
+            optim.lr_scheduler.StepLR(opt, step_size=30, gamma=0.5),
+        'CosineAnnealingLR (T_max=150)':
+            optim.lr_scheduler.CosineAnnealingLR(opt, T_max=150),
+        'CosineAnnealingWarmRestarts':
+            optim.lr_scheduler.CosineAnnealingWarmRestarts(opt, T_0=50),
+    }
+
+    plt.figure(figsize=(10, 5))
+    for name, sched in schedulers.items():
+        lrs = []
+        for epoch in range(epochs):
+            opt.param_groups[0]['lr'] = 1.0  # 重置
+            sched.step()
+            lrs.append(opt.param_groups[0]['lr'])
+        plt.plot(lrs, label=name, linewidth=2)
+
+    plt.xlabel('Epoch')
+    plt.ylabel('Learning Rate')
+    plt.title('Learning Rate Scheduler Comparison')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+visualize_schedulers()
+```
+
+# 五、梯度裁剪（Gradient Clipping）
+
+当梯度范数超过阈值时，将其缩放到阈值以内，防止梯度爆炸：
+
+$$\text{if } \|\mathbf{g}\| > \text{max\_norm}, \quad \mathbf{g} \leftarrow \frac{\text{max\_norm}}{\|\mathbf{g}\|} \cdot \mathbf{g}$$
+
+```python
+# 在训练循环中使用梯度裁剪
+for epoch in range(n_epochs):
+    optimizer.zero_grad()
+    loss = criterion(model(X), y)
+    loss.backward()
+
+    # 梯度裁剪：将所有参数的梯度的总范数限制在 max_norm 以内
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    # 也可以按值裁剪：clip_grad_value_(model.parameters(), clip_value=0.5)
+
+    optimizer.step()
+```
+
+# 六、完整训练模板
+
+综合以上所有组件，以下是一个生产级训练的完整模板：
+
+```python
+def train_model(model, train_loader, val_loader, criterion, optimizer,
+                scheduler, n_epochs, device='cpu', clip_grad_norm=None,
+                early_stopping_patience=None):
+    """
+    完整的 DNN 训练模板
+    """
+    model = model.to(device)
+    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+
+    for epoch in range(n_epochs):
+        # ===== 训练阶段 =====
+        model.train()
+        train_loss, train_correct, train_total = 0.0, 0, 0
+
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+
+            # 1. 前向传播
+            outputs = model(X_batch)
+            loss = criterion(outputs, y_batch)
+
+            # 2. 反向传播
+            optimizer.zero_grad()
+            loss.backward()
+
+            # 3. 梯度裁剪（可选）
+            if clip_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_norm=clip_grad_norm)
+
+            # 4. 参数更新
+            optimizer.step()
+
+            # 5. 统计
+            train_loss += loss.item() * X_batch.size(0)
+            _, preds = outputs.max(1)
+            train_correct += preds.eq(y_batch).sum().item()
+            train_total += y_batch.size(0)
+
+        train_loss /= train_total
+        train_acc = train_correct / train_total
+
+        # ===== 验证阶段 =====
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+
+        with torch.no_grad():
+            for X_batch, y_batch in val_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                outputs = model(X_batch)
+                loss = criterion(outputs, y_batch)
+
+                val_loss += loss.item() * X_batch.size(0)
+                _, preds = outputs.max(1)
+                val_correct += preds.eq(y_batch).sum().item()
+                val_total += y_batch.size(0)
+
+        val_loss /= val_total
+        val_acc = val_correct / val_total
+
+        # ===== 学习率调度 =====
+        if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(val_loss)  # ReduceLROnPlateau 需要验证指标
+        elif scheduler is not None:
+            scheduler.step()
+
+        # ===== 记录 =====
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+
+        # ===== 早停 =====
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = {k: v.cpu().clone()
+                                for k, v in model.state_dict().items()}
+            patience_counter = 0
+        elif early_stopping_patience is not None:
+            patience_counter += 1
+            if patience_counter >= early_stopping_patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+
+        # ===== 日志 =====
+        if epoch % 20 == 0 or epoch == n_epochs - 1:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Epoch {epoch+1:3d}/{n_epochs} | "
+                  f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.3f} | "
+                  f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.3f} | "
+                  f"LR: {current_lr:.6f}")
+
+    # 恢复最佳模型
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"Loaded best model (val_loss={best_val_loss:.4f})")
+
+    return model, history
+
+
+# ===== 使用示例 =====
+from torch.utils.data import DataLoader, TensorDataset
+
+# 准备 DataLoader
+train_dataset = TensorDataset(X_train_t, y_train_t)
+val_dataset = TensorDataset(X_test_t, y_test_t)
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+# 构建模型
+model = nn.Sequential(
+    nn.Linear(2, 64), nn.ReLU(),
+    nn.Linear(64, 64), nn.ReLU(),
+    nn.Linear(64, 2),
+)
+
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=200)
+
+# 训练
+model, history = train_model(
+    model, train_loader, val_loader, criterion, optimizer, scheduler,
+    n_epochs=200, clip_grad_norm=1.0, early_stopping_patience=30)
+
+# 可视化训练历史
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].plot(history['train_loss'], label='Train')
+axes[0].plot(history['val_loss'], label='Val')
+axes[0].set_xlabel('Epoch'); axes[0].set_ylabel('Loss')
+axes[0].set_title('Loss Curves'); axes[0].legend(); axes[0].grid(True, alpha=0.3)
+
+axes[1].plot(history['train_acc'], label='Train')
+axes[1].plot(history['val_acc'], label='Val')
+axes[1].set_xlabel('Epoch'); axes[1].set_ylabel('Accuracy')
+axes[1].set_title('Accuracy Curves'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+## 总结
+
+| 组件 | 作用 | 关键参数 |
+|------|------|----------|
+| 前向传播 | 计算预测和损失 | — |
+| 反向传播 | 计算所有参数的梯度 | — |
+| 优化器 | 根据梯度更新参数 | lr, momentum, betas |
+| 学习率调度 | 动态调整学习率 | step_size, gamma, T_max |
+| 梯度裁剪 | 防止梯度爆炸 | max_norm |
+| 早停 | 防止过拟合 | patience |
+
+这个训练模板足够通用，可以直接复用到后续所有课程的分类/回归任务中。
