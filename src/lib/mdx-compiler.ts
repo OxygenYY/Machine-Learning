@@ -1,17 +1,17 @@
-import { compile } from "@mdx-js/mdx";
+import { compile, run } from "@mdx-js/mdx";
+import * as jsxRuntime from "react/jsx-runtime";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import rehypeSlug from "rehype-slug";
 import rehypePrettyCode from "rehype-pretty-code";
+import type { MDXComponents } from "mdx/types";
+import React from "react";
 
-function escapeJsxLiteral( content: string): string {
-  // Split content by code blocks (```) and inline code (`)
-  // Only escape < outside code blocks
+function escapeJsxLiteral(content: string): string {
   const result: string[] = [];
   let i = 0;
   while (i < content.length) {
-    // Check for code block start
     if (content.startsWith("```", i)) {
       const end = content.indexOf("\n```", i + 3);
       if (end !== -1) {
@@ -20,7 +20,6 @@ function escapeJsxLiteral( content: string): string {
         continue;
       }
     }
-    // Check for inline code
     if (content[i] === "`" && content[i + 1] !== "`") {
       const end = content.indexOf("`", i + 1);
       if (end !== -1) {
@@ -29,7 +28,6 @@ function escapeJsxLiteral( content: string): string {
         continue;
       }
     }
-    // Check for math block
     if (content.startsWith("$$", i)) {
       const end = content.indexOf("$$", i + 2);
       if (end !== -1) {
@@ -38,7 +36,6 @@ function escapeJsxLiteral( content: string): string {
         continue;
       }
     }
-    // Check for inline math
     if (content[i] === "$" && content[i + 1] !== "$") {
       const end = content.indexOf("$", i + 1);
       if (end !== -1) {
@@ -47,13 +44,11 @@ function escapeJsxLiteral( content: string): string {
         continue;
       }
     }
-    // Regular text: escape < followed by non-space (JSX tag)
     if (content[i] === "<" && i + 1 < content.length && /[a-zA-Z0-9\-]/.test(content[i + 1])) {
       result.push("{'<'}");
       i++;
       continue;
     }
-    // Regular text: escape { (JSX expression)
     if (content[i] === "{") {
       result.push("{'{'}");
       i++;
@@ -65,17 +60,27 @@ function escapeJsxLiteral( content: string): string {
   return result.join("");
 }
 
-export async function compileMdx(rawContent: string): Promise<string> {
+const rehypePlugins = [
+  rehypeKatex,
+  rehypeSlug,
+  [rehypePrettyCode, { theme: "github-dark", keepBackground: false }],
+] as any;
+
+export async function compileMdxToJsx(
+  rawContent: string,
+  components?: MDXComponents
+): Promise<React.ReactElement> {
   const escaped = escapeJsxLiteral(rawContent);
-  const result = await compile(escaped, {
+
+  const compiled = await compile(escaped, {
     outputFormat: "function-body",
     remarkPlugins: [remarkMath, remarkGfm],
-    rehypePlugins: [
-      rehypeKatex,
-      rehypeSlug,
-      [rehypePrettyCode, { theme: "github-dark", keepBackground: false }],
-    ],
+    rehypePlugins,
   });
 
-  return String(result.value);
+  const { default: MDXContent } = await run(String(compiled.value), {
+    ...jsxRuntime,
+  });
+
+  return React.createElement(MDXContent, { components });
 }

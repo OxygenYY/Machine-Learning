@@ -8,8 +8,8 @@ import { Separator } from "@/components/ui/separator";
 import { DIFFICULTY_CONFIG } from "@/lib/constants";
 import { Clock, ListChecks } from "lucide-react";
 import type { Metadata } from "next";
-import { compileMdx } from "@/lib/mdx-compiler";
-import { MDXContent } from "./mdx-content";
+import { compileMdxToJsx } from "@/lib/mdx-compiler";
+import { useMDXComponents } from "@/mdx-components";
 
 interface Props {
   params: Promise<{ slug: string }>;
@@ -44,7 +44,8 @@ export default async function LessonPage({ params }: Props) {
 
   const { prev, next } = getAdjacentLessons(slug);
   const diffConfig = DIFFICULTY_CONFIG[lesson.meta.difficulty];
-  const mdxCode = await compileMdx(lesson.rawContent);
+  const components = useMDXComponents({});
+  const mdxElement = await compileMdxToJsx(lesson.rawContent, components);
 
   return (
     <div className="animate-fade-in">
@@ -106,8 +107,10 @@ export default async function LessonPage({ params }: Props) {
 
       {/* Lesson content */}
       <div className="flex gap-8">
-        <article className="flex-1 min-w-0 max-w-3xl">
-          <MDXContent code={mdxCode} />
+        <div className="flex-1 min-w-0 max-w-3xl">
+          <article className="prose dark:prose-invert max-w-none">
+            {mdxElement}
+          </article>
 
           <Separator className="my-8" />
 
@@ -115,7 +118,7 @@ export default async function LessonPage({ params }: Props) {
             prev={prev ? { slug: prev.meta.slug, title: prev.meta.title } : null}
             next={next ? { slug: next.meta.slug, title: next.meta.title } : null}
           />
-        </article>
+        </div>
 
         {lesson.headings.length > 0 && (
           <aside className="hidden xl:block w-56 shrink-0">
